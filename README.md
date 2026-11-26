@@ -15,8 +15,9 @@ fail-safe date, so nothing is lost forever.
                          │
                          ├─► DEK wrapped by drand timelock (tlock)  ── opens when a drand round is published
                          │                                             (time-locks + every vault's fail-safe)
-                         └─► DEK wrapped by AWS KMS in the escrow   ── released once by the enclave verifier
-                                                                       when the sealed condition is met
+                         └─► DEK held by the escrow                 ── released once by the enclave verifier
+                               single KMS key, or a 2-of-3 split:         when the sealed condition is met
+                               KMS · second provider · guardian (age)     (drand time, or NFL: two sources agree)
 ```
 
 1. **AES-256-GCM vault** (`packages/core`): files are streamed in 1 MiB chunks. Each chunk is
@@ -36,6 +37,14 @@ fail-safe date, so nothing is lost forever.
    Decrypt with an attestation-bound Recipient. A key policy pinned to the enclave image's PCR0
    means nothing else can decrypt, and the key is released once. See
    [services/escrow/README.md](services/escrow/README.md) and [docs/ENCLAVE.md](docs/ENCLAVE.md).
+4. **Verifiers** (`services/escrow/src/verifiers`): time comes from drand alone. NFL results
+   are fetched by the verifier itself from API-Sports and TheSportsDB, over TLS that terminates
+   inside the enclave. Both sources must agree, and ties, postponements and cancellations follow
+   the lock's sealed rules. The parent host relays bytes it can't read or forge, and it
+   delivers the enclave's AWS credentials and API keys over the same verifier channel.
+5. **2-of-3 key split** (optional): the DEK is split with an audited Shamir library into shares
+   held by the enclave-bound KMS key, a second independent provider, and a trusted person's age
+   key. Any two release it, and no single account can. The tlock fail-safe stays as it is.
 
 ## Status
 
@@ -45,8 +54,8 @@ fail-safe date, so nothing is lost forever.
 | 2 | tlock: wrap/unwrap the DEK on drand quicknet, round-for-time math | ✅ done |
 | 3 | CLI, local only: `condlock lock / unlock / status / log` with tlock fail-safe, deletion, copies checklist | ✅ done |
 | 4 | Escrow service: Hono API, Postgres, KMS envelope wrapping, device signatures, audit log, enclave-ready verifier | ✅ done (mocks; real KMS and enclave are manual) |
-| 5 | Verifiers: time (server clock + drand) and NFL (API-Sports + TheSportsDB must agree) | ⏳ next |
-| 6 | End to end against the deployed escrow, including cheat attempts | planned |
+| 5 | Verifiers (time via drand; NFL with API-Sports + TheSportsDB agreeing), TLS egress from the enclave, credential delivery, 2-of-3 key split | ✅ done (mocks; live sports test, real KMS and enclave are manual) |
+| 6 | End to end against the deployed escrow, including cheat attempts | ⏳ next |
 
 ## Using the CLI
 
@@ -79,7 +88,8 @@ Exit codes: `0` ok · `1` error · `2` still locked · `3` drand unreachable (st
 ```
 packages/core      crypto: chunked AES-256-GCM vault, manifest, tlock wrap/unwrap
 packages/cli       condlock lock | unlock | status | log (local, tlock only)
-services/escrow    Hono API, key-release verifier (enclave-ready), KMS + Postgres adapters
+services/escrow    Hono API, key-release verifier (enclave-ready), NFL verifier, TLS egress,
+                   KMS + 2-of-3 split + Postgres adapters
 db/migrations      locks, devices, audit_log, request_nonces + guard triggers
 docs/DESIGN.md     design summary, vault and envelope formats
 docs/ENCLAVE.md    Nitro Enclave + KMS key policy setup (manual runbook)
@@ -94,7 +104,8 @@ pnpm install
 pnpm typecheck
 pnpm test                                   # everything, including real drand (~2 min)
 pnpm -r test:offline                        # skip network tests (CONDLOCK_OFFLINE=1)
-pnpm --filter @condlock/escrow test:real-kms   # manual: real AWS KMS, see services/escrow/README.md
+pnpm --filter @condlock/escrow test:real-kms      # manual: real AWS KMS, see services/escrow/README.md
+pnpm --filter @condlock/escrow test:live-sports   # manual: real API-Sports + TheSportsDB free tiers
 ```
 
 The network tests talk to the public drand quicknet. One in `core` and one in `cli` lock for one
@@ -103,9 +114,15 @@ one restores a mixed folder (photo, PDF, video) and compares it byte for byte. E
 works inside its own temp directory. The offline suite uses a
 mocked drand network that signs real BLS beacons with a throwaway key.
 
-The escrow tests run against PGlite (real Postgres in WASM), a mock KMS with a PCR0 key policy,
-a mock Nitro attestation, a mocked drand network and a real Unix socket. They need no cloud
-account. The one real-KMS test is manual and skipped unless you configure a test key.
+The escrow tests run against:
+- PGlite (real Postgres in WASM);
+- a mock KMS with a PCR0 key policy, and a mock Nitro attestation;
+- a mocked drand network and a real Unix socket;
+- mock sports and KMS HTTPS servers, with certificates from a throwaway in-memory CA, reached
+  through byte forwarders.
+
+They need no cloud account and no network. The real-KMS and live-sports tests are manual, and
+skipped unless you configure your own keys.
 
 ## Secrets
 

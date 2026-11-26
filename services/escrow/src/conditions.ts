@@ -1,27 +1,40 @@
 /**
  * Sealed conditions. A condition is validated, canonicalised (sorted keys) and hashed when the
- * lock is created; the JSON and its SHA-256 are stored and never change. Verifiers (milestone 5)
- * read them to decide "met".
+ * lock is created; the JSON and its SHA-256 are stored and never change. The key-release verifier
+ * reads them (from the request, re-validated) to decide "met": src/verifiers/.
  */
 import { createHash } from "node:crypto";
 
 export interface TimeCondition {
   type: "time";
-  /** UTC instant; the lock may be released at or after it by the server's own clock. */
+  /** UTC instant; released once a verified drand beacon for that time exists. */
   unlockAt: string;
+}
+
+export interface NflGame {
+  /** API-Sports (american-football v1) game ID. */
+  apiSportsId: string;
+  /** TheSportsDB event ID for the same game. */
+  theSportsDbId: string;
+  /** Team names as both providers spell them (compared case- and punctuation-insensitively). */
+  home: string;
+  away: string;
+  /** Scheduled kickoff (UTC). A "final" is only accepted once drand time is past it. */
+  kickoffAt: string;
 }
 
 export interface NflCondition {
   type: "nfl";
-  /** The data provider's game ID (API-Sports), plus the scheduled kickoff for the polling window. */
-  gameId: string;
-  scheduledAt: string;
-  /** Team that must win, as named by the provider. */
+  game: NflGame;
+  /** Must be game.home or game.away. */
   team: string;
-  outcome: "win";
-  /** Sealed rules for games that don't finish normally. */
-  ifTie: "stay-locked";
-  ifPostponed: "stay-locked";
+  /** Unlock when `team` wins, or when it loses. */
+  outcome: "win" | "loss";
+  /** Sealed rules for games that don't end in a win or loss. "stay-locked" = only the fail-safe opens it. */
+  ifTie: "unlock" | "stay-locked";
+  /** "wait" keeps waiting for the rescheduled game (same IDs). */
+  ifPostponed: "wait" | "unlock" | "stay-locked";
+  ifCancelled: "unlock" | "stay-locked";
 }
 
 export type Condition = TimeCondition | NflCondition;
@@ -55,25 +68,52 @@ export function parseCondition(input: unknown): Condition {
       exactKeys(o, ["type", "unlockAt"]);
       return { type: "time", unlockAt: isoUtc(o.unlockAt, "unlockAt") };
     case "nfl": {
-      exactKeys(o, ["type", "gameId", "scheduledAt", "team", "outcome", "ifTie", "ifPostponed"]);
-      if (typeof o.gameId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(o.gameId)) throw new ConditionError("gameId");
-      if (typeof o.team !== "string" || o.team.trim().length === 0 || o.team.length > 100) throw new ConditionError("team");
-      if (o.outcome !== "win") throw new ConditionError('outcome must be "win"');
-      if (o.ifTie !== "stay-locked") throw new ConditionError('ifTie must be "stay-locked"');
-      if (o.ifPostponed !== "stay-locked") throw new ConditionError('ifPostponed must be "stay-locked"');
+      exactKeys(o, ["type", "game", "team", "outcome", "ifTie", "ifPostponed", "ifCancelled"]);
+      const g = o.game as Record<string, unknown>;
+      if (typeof g !== "object" || g === null || Array.isArray(g)) throw new ConditionError("game must be an object");
+      exactKeys(g, ["apiSportsId", "theSportsDbId", "home", "away", "kickoffAt"]);
+      const id = (v: unknown, f: string) => {
+        if (typeof v !== "string" || !/^[0-9]{1,12}$/.test(v)) throw new ConditionError(`game.${f} must be a numeric ID string`);
+        return v;
+      };
+      const name = (v: unknown, f: string) => {
+        if (typeof v !== "string" || v.trim().length === 0 || v.length > 100) throw new ConditionError(f);
+        return v.trim().replace(/\s+/g, " ");
+      };
+      const game: NflGame = {
+        apiSportsId: id(g.apiSportsId, "apiSportsId"),
+        theSportsDbId: id(g.theSportsDbId, "theSportsDbId"),
+        home: name(g.home, "game.home"),
+        away: name(g.away, "game.away"),
+        kickoffAt: isoUtc(g.kickoffAt, "game.kickoffAt"),
+      };
+      if (teamKey(game.home) === teamKey(game.away)) throw new ConditionError("home and away must differ");
+      const team = name(o.team, "team");
+      if (teamKey(team) !== teamKey(game.home) && teamKey(team) !== teamKey(game.away)) {
+        throw new ConditionError("team must be the game's home or away team");
+      }
+      const oneOf = <T extends string>(v: unknown, f: string, allowed: readonly T[]): T => {
+        if (!allowed.includes(v as T)) throw new ConditionError(`${f} must be one of ${allowed.map((a) => `"${a}"`).join(", ")}`);
+        return v as T;
+      };
       return {
         type: "nfl",
-        gameId: o.gameId,
-        scheduledAt: isoUtc(o.scheduledAt, "scheduledAt"),
-        team: o.team.trim(),
-        outcome: "win",
-        ifTie: "stay-locked",
-        ifPostponed: "stay-locked",
+        game,
+        team,
+        outcome: oneOf(o.outcome, "outcome", ["win", "loss"] as const),
+        ifTie: oneOf(o.ifTie, "ifTie", ["unlock", "stay-locked"] as const),
+        ifPostponed: oneOf(o.ifPostponed, "ifPostponed", ["wait", "unlock", "stay-locked"] as const),
+        ifCancelled: oneOf(o.ifCancelled, "ifCancelled", ["unlock", "stay-locked"] as const),
       };
     }
     default:
       throw new ConditionError(`unsupported condition type ${JSON.stringify(o.type)}`);
   }
+}
+
+/** Team names compare case- and punctuation-insensitively ("San Francisco 49ers" = "san francisco 49ers"). */
+export function teamKey(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 /** JSON with keys sorted at every level: the exact bytes that are hashed. */

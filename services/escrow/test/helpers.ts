@@ -13,6 +13,8 @@ import { generateDeviceKeyPair, signRequest, type DeviceKeyPair } from "../src/s
 import type { KeyReleaser } from "../src/verifier/protocol.js";
 import { InProcessReleaser, SocketReleaser, serveVerifier } from "../src/verifier/transport.js";
 import { KeyReleaseVerifier } from "../src/verifier/verifier.js";
+import type { SecretStore } from "../src/verifier/secrets.js";
+import type { NflChecker } from "../src/verifiers/nfl.js";
 
 /** Not a secret: only ever used against an in-memory test database. */
 export const TEST_ADMIN_TOKEN = "test-admin-token-not-a-secret";
@@ -38,6 +40,11 @@ export interface HarnessOptions {
   /** Run the verifier behind a real Unix socket instead of in-process. */
   socket?: boolean;
   releaser?: KeyReleaser;
+  /** Full control over both sides' key registries (2-of-3 tests). Overrides kms/verifierKms. */
+  apiKeys?: KeyWrapRegistry;
+  verifierKeys?: KeyWrapRegistry;
+  nfl?: NflChecker;
+  secrets?: SecretStore;
 }
 
 export interface Harness {
@@ -46,6 +53,9 @@ export interface Harness {
   kms: KeyWrapper;
   service: MockKmsService | undefined;
   drand: MockDrand;
+  verifier: KeyReleaseVerifier;
+  /** The verifier's Unix socket, when socket: true. */
+  socketPath: string | undefined;
   app: ReturnType<typeof createApp>;
   /** The server clock; use setTime to move it (drand follows). */
   clock: { now: Date };
@@ -89,19 +99,25 @@ export async function harness(opts: HarnessOptions = {}): Promise<Harness> {
   }
   verifierKms ??= kms;
 
-  const verifier = new KeyReleaseVerifier({ keys: new KeyWrapRegistry(verifierKms), chain: drand.chainParams });
+  const verifier = new KeyReleaseVerifier({
+    keys: opts.verifierKeys ?? new KeyWrapRegistry(verifierKms),
+    chain: drand.chainParams,
+    ...(opts.nfl ? { nfl: opts.nfl } : {}),
+    ...(opts.secrets ? { secrets: opts.secrets } : {}),
+  });
   let server: Server | undefined;
   let socketDir: string | undefined;
+  let socketPath: string | undefined;
   let releaser = opts.releaser;
   if (!releaser && opts.socket) {
     socketDir = await fsp.mkdtemp(path.join(tmpdir(), "condlock-verifier-"));
-    const socketPath = path.join(socketDir, "verifier.sock");
+    socketPath = path.join(socketDir, "verifier.sock");
     server = await serveVerifier(verifier, { path: socketPath });
     releaser = new SocketReleaser({ path: socketPath });
   }
   releaser ??= new InProcessReleaser(verifier);
 
-  const escrow = new Escrow({ db, keys: new KeyWrapRegistry(kms), releaser, drand, now: () => new Date(clock.now) });
+  const escrow = new Escrow({ db, keys: opts.apiKeys ?? new KeyWrapRegistry(kms), releaser, drand, now: () => new Date(clock.now) });
   const app = createApp({ escrow, adminToken: TEST_ADMIN_TOKEN });
 
   const registerDevice = async (label = "test laptop"): Promise<Device> => {
@@ -145,7 +161,7 @@ export async function harness(opts: HarnessOptions = {}): Promise<Harness> {
     if (socketDir) await fsp.rm(socketDir, { recursive: true, force: true });
   };
 
-  return { db, escrow, kms, service, drand, app, clock, setTime, device, registerDevice, call, close };
+  return { db, escrow, kms, service, drand, verifier, socketPath, app, clock, setTime, device, registerDevice, call, close };
 }
 
 /** A valid time-lock body: unlocks in 1 hour, fail-safe in 1 year (server clock). */

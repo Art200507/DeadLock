@@ -9,7 +9,8 @@ import { randomBytes } from "node:crypto";
 import { fetchBeacon, type ChainClient } from "drand-client";
 import type { SqlClient } from "./db.js";
 import { type Condition, ConditionError, canonicalJson, conditionHash, parseCondition, sealHash } from "./conditions.js";
-import { KeyServiceError, isWrappedKey, type KeyWrapRegistry, type WrappedKey } from "./keywrap/types.js";
+import { THRESHOLD_SCHEME, parseThresholdParams } from "./keywrap/threshold.js";
+import { KeyServiceError, WrapInputError, isWrappedKey, type KeyWrapRegistry, type WrappedKey } from "./keywrap/types.js";
 import type { KeyReleaser, ReleaseResponse } from "./verifier/protocol.js";
 
 export const DAY_MS = 86_400_000;
@@ -30,6 +31,10 @@ export interface LockView {
   metAt: string | null;
   releasedAt: string | null;
   latestVerifierResult: { at: string; detail: Record<string, unknown> } | null;
+  /** How the key is held, e.g. "aws-kms/v1" or "shamir-2of3/v1". */
+  keyScheme: string;
+  /** 2-of-3 locks: the guardian's public key and their encrypted share, to pass on to them. */
+  guardian: { recipient: string; share: string } | null;
 }
 
 export interface AuditEntry {
@@ -78,6 +83,16 @@ interface LockRow {
 }
 
 const iso = (d: Date | null) => (d ? new Date(d).toISOString() : null);
+
+function pick(o: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  return Object.fromEntries(keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]));
+}
+
+function guardianOf(w: WrappedKey): { recipient: string; share: string } | null {
+  if (w.scheme !== THRESHOLD_SCHEME) return null;
+  const g = parseThresholdParams(w).shares[2];
+  return { recipient: g.recipient, share: g.age };
+}
 
 export function isVaultId(v: string): boolean {
   return /^[0-9a-f]{32}$/.test(v);
@@ -164,6 +179,8 @@ export class Escrow {
     condition: unknown;
     failsafeAt: unknown;
     dek: unknown;
+    /** 2-of-3 locks: { recipient: "age1..." }, the trusted person's age public key. */
+    guardian?: unknown;
     deviceId: string;
   }): Promise<LockView> {
     const { vaultId, deviceId } = input;
@@ -196,6 +213,17 @@ export class Escrow {
         throw new EscrowError(400, "bad-failsafe", "the fail-safe can't be earlier than unlockAt");
       }
     }
+    if (condition.type === "nfl" && failsafeAt.getTime() <= Date.parse(condition.game.kickoffAt)) {
+      throw new EscrowError(400, "bad-failsafe", "the fail-safe must be after kickoff");
+    }
+    let guardianRecipient: string | undefined;
+    if (input.guardian !== undefined) {
+      const g = input.guardian as { recipient?: unknown };
+      if (typeof g !== "object" || g === null || typeof g.recipient !== "string" || !/^age1[a-z0-9]{20,4000}$/.test(g.recipient)) {
+        throw new EscrowError(400, "bad-guardian", "guardian.recipient must be an age public key (age1...)");
+      }
+      guardianRecipient = g.recipient;
+    }
     if (typeof input.dek !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(input.dek)) {
       throw new EscrowError(400, "bad-request", "dek must be 32 bytes, base64");
     }
@@ -207,8 +235,13 @@ export class Escrow {
       if ((await this.db.query("select 1 from locks where vault_id = $1", [vaultId])).rows.length) {
         throw new EscrowError(409, "lock-exists", "a lock for this vault already exists");
       }
-      wrapped = await this.keys.wrap(dek, { vaultId, seal: sealHash({ vaultId, condition, failsafeAt }) });
+      const context = { vaultId, seal: sealHash({ vaultId, condition, failsafeAt }) };
+      wrapped = await this.keys.wrap(dek, context, guardianRecipient ? { guardianRecipient } : undefined);
+      if (guardianRecipient && wrapped.scheme !== THRESHOLD_SCHEME) {
+        throw new EscrowError(400, "bad-guardian", "this escrow doesn't split keys, so a guardian can't be used");
+      }
     } catch (err) {
+      if (err instanceof WrapInputError) throw new EscrowError(400, "bad-guardian", err.message);
       if (err instanceof KeyServiceError) throw new EscrowError(503, "key-service", "key service unavailable, nothing was stored");
       throw err;
     } finally {
@@ -234,6 +267,7 @@ export class Escrow {
       conditionType: condition.type,
       failsafeAt: failsafeAt.toISOString(),
       keyScheme: wrapped.scheme,
+      ...(guardianRecipient ? { guardianRecipient } : {}),
     });
     return this.getLock(vaultId);
   }
@@ -255,6 +289,8 @@ export class Escrow {
       metAt: iso(row.met_at),
       releasedAt: iso(row.released_at),
       latestVerifierResult: rows[0] ? { at: iso(rows[0].at)!, detail: rows[0].detail_json } : null,
+      keyScheme: row.wrapped_dek.scheme,
+      guardian: guardianOf(row.wrapped_dek),
     };
   }
 
@@ -263,9 +299,17 @@ export class Escrow {
    * verifier decides from the sealed terms and drand alone; this side enforces "only once" and
    * audits every request and outcome.
    */
-  async unlock(vaultId: string, deviceId: string): Promise<{ dek: Uint8Array; via: "condition" | "failsafe" }> {
+  async unlock(
+    vaultId: string,
+    deviceId: string,
+    opts: { guardianShare?: unknown } = {},
+  ): Promise<{ dek: Uint8Array; via: "condition" | "failsafe"; detail?: Record<string, unknown> }> {
     const row = await this.requireLock(vaultId);
-    await this.audit(vaultId, "unlock-requested", { deviceId });
+    const gs = opts.guardianShare;
+    if (gs !== undefined && (typeof gs !== "string" || gs.length > 512 || !/^[A-Za-z0-9+/]+={0,2}$/.test(gs))) {
+      throw new EscrowError(400, "bad-request", "guardianShare must be base64");
+    }
+    await this.audit(vaultId, "unlock-requested", { deviceId, ...(gs ? { guardianShareProvided: true } : {}) });
 
     if (row.status === "released" || row.status === "failsafe") {
       await this.audit(vaultId, "unlock-denied", { deviceId, reason: "already-released" });
@@ -292,6 +336,7 @@ export class Escrow {
         failsafeAt: iso(row.failsafe_at)!,
         wrappedDek: row.wrapped_dek,
         evidence: { drandBeacon: beacon },
+        ...(typeof gs === "string" ? { guardianShare: gs } : {}),
       });
     } catch {
       await this.audit(vaultId, "unlock-failed", { deviceId, reason: "verifier-unavailable" });
@@ -299,19 +344,38 @@ export class Escrow {
     }
 
     if (!res.ok) {
+      const d = res.detail ?? {};
+      if (row.condition_json.type === "nfl" && (d.reason || d.reports)) {
+        await this.audit(vaultId, "verifier-check", { outcome: res.code, ...pick(d, ["reason", "resolved", "disagree", "reports"]) });
+      }
       if (res.code === "still-locked") {
         await this.audit(vaultId, "unlock-denied", { deviceId, reason: "still-locked", drandRound: beacon.round });
-        const d = res.detail ?? {};
         throw new EscrowError(423, "still-locked", "still locked", {
           reason: d.unlockAt
             ? `condition not met yet: unlocks at drand round ${String(d.unlockRound)} (${String(d.unlockAt)})`
-            : `condition not met yet: waiting for the ${row.condition_json.type} verifier`,
+            : `condition not met: ${String(d.reason ?? "waiting for the verifier")}`,
           failsafeAt: iso(row.failsafe_at),
           drandRound: beacon.round,
           ...(d.unlockAt ? { unlockAt: d.unlockAt } : {}),
+          ...(d.resolved !== undefined ? { resolved: d.resolved } : {}),
+          ...(d.disagree ? { sourcesDisagree: true } : {}),
         });
       }
-      await this.audit(vaultId, "unlock-failed", { deviceId, reason: res.code });
+      await this.audit(vaultId, "unlock-failed", {
+        deviceId,
+        reason: res.code,
+        ...(res.code === "insufficient-shares" ? { holders: d.holders } : {}),
+        ...(res.code === "sources-unavailable" ? { message: res.message } : {}),
+      });
+      if (res.code === "insufficient-shares") {
+        throw new EscrowError(503, "insufficient-shares", "the condition is met, but fewer than 2 of the 3 key shares are available", {
+          holders: d.holders,
+          hint: "ask the guardian to decrypt their share (GET /locks/:id → guardian.share) and retry with { guardianShare }",
+        });
+      }
+      if (res.code === "sources-unavailable") {
+        throw new EscrowError(503, "sources-unavailable", `couldn't check the result: ${res.message}; try again`);
+      }
       if (res.code === "key-service" || res.code === "bad-evidence") {
         throw new EscrowError(503, res.code, `${res.message}; try again`);
       }
@@ -329,12 +393,20 @@ export class Escrow {
       await this.audit(vaultId, "unlock-denied", { deviceId, reason: "already-released" });
       throw new EscrowError(409, "already-released", "this key was already released once");
     }
-    await this.audit(vaultId, "released", { deviceId, via: res.via, drandRound: beacon.round });
-    return { dek, via: res.via };
+    if (row.condition_json.type === "nfl" && res.detail) {
+      await this.audit(vaultId, "verifier-check", { outcome: "met", ...pick(res.detail, ["reason", "reports"]) });
+    }
+    await this.audit(vaultId, "released", {
+      deviceId,
+      via: res.via,
+      drandRound: beacon.round,
+      ...(typeof gs === "string" ? { guardianShareUsed: true } : {}),
+    });
+    return { dek, via: res.via, ...(res.detail ? { detail: pick(res.detail, ["reason"]) } : {}) };
   }
 
   /**
-   * Bookkeeping for verifier jobs (milestone 5): records "met" with its evidence for status and
+   * Bookkeeping for background verifier jobs: records "met" with its evidence for status and
    * the log. Not exposed over HTTP, and not what releases a key: the verifier re-checks evidence
    * at release time.
    */

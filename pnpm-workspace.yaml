@@ -1,3 +1,10 @@
 packages:
   - packages/*
   - services/*
+
+# drand-client imports @noble/hashes without declaring it (it relied on hoisting). Pin the
+# version its sibling tlock-js uses, so newer copies pulled in by other packages can't shadow it.
+packageExtensions:
+  drand-client@1.2.5:
+    dependencies:
+      "@noble/hashes": "1.8.0"

@@ -2,8 +2,9 @@
 
 > **Status: a runbook for you to follow later. Nothing here has been run.** The code is
 > enclave-ready and tested against mocks: a mock KMS key policy on PCR0, a mock attestation
-> document, and a real CMS `CiphertextForRecipient`. The steps below create real AWS resources
-> that cost money (an EC2 instance billed per hour, and a KMS key at about $1/month). Check
+> document, a real CMS `CiphertextForRecipient`, TLS egress through byte forwarders, and
+> credential delivery over the verifier socket. The steps below create real AWS resources
+> that cost money (an EC2 instance billed per hour, and KMS keys at about $1/month each). Check
 > current AWS pricing and tear everything down when you're done.
 
 ## Why
@@ -15,25 +16,33 @@ release any key early (the "admin problem" in the design doc). With this setup:
   `PCR0` equals the hash of one specific verifier image;
 - the policy denies `kms:PutKeyPolicy` to everyone, root included, so that rule can't be loosened;
 - the verifier inside the enclave releases a key only when the sealed terms are met. It
-  recomputes the seal and checks time with a BLS-verified drand beacon, and it reads no clock
-  and trusts nothing from the parent host;
+  recomputes the seal, checks time with a BLS-verified drand beacon, and fetches NFL results
+  itself from API-Sports and TheSportsDB over TLS that terminates inside the enclave. It reads
+  no clock for decisions and trusts nothing from the parent host;
 - KMS returns the key encrypted to the enclave's ephemeral RSA key (`CiphertextForRecipient`),
   so the parent instance only ever relays ciphertext.
 
 ```
- ┌──────────────── EC2 parent instance (untrusted) ─────────────────┐
- │  API (Hono) ── Unix socket ── socat ──┐                            │
- │                                       │ vsock :5005                │
- │  vsock-proxy :8000 ─────────── kms.<region>.amazonaws.com:443      │
- │        ▲                              │                            │
- │ ┌──────┼──────── Nitro Enclave ───────▼─────────────────────────┐  │
- │ │ socat 127.0.0.1:443 → vsock 3:8000    verifier (node)           │ │
- │ │ TLS to KMS terminates HERE            ├─ checks seal + drand    │ │
- │ │                                       ├─ /dev/nsm → attestation │ │
- │ │                                       └─ KMS Decrypt(Recipient) │ │
- │ └─────────────────────────────────────────────────────────────────┘ │
- └────────────────────────────────────────────────────────────────────┘
+EC2 parent instance (untrusted)
+  API (Hono) ───────────── release requests ──┐
+  credential relay ─ creds + sports keys ─────┤
+                                              └─ Unix socket ─ socat ─ vsock :5005 ─┐
+  vsock-proxy :8000 ─► kms.<region>.amazonaws.com:443                              │
+  vsock-proxy :8001 ─► v1.american-football.api-sports.io:443                      │
+  vsock-proxy :8002 ─► www.thesportsdb.com:443                                     │
+        ▲ raw TLS bytes only                                                       │
+  ┌─────┼──────────────────── Nitro Enclave ───────────────────────────────────────▼──
+  │ socat 127.0.0.1:800x → vsock 3:800x      verifier (node)
+  │ TLS to all three hosts ends here,        ├─ seal + drand beacon (BLS-verified)
+  │ checked against Node's bundled roots     ├─ NFL: both providers must agree
+  │                                          ├─ /dev/nsm → attestation document
+  │                                          └─ KMS Decrypt with Recipient (1 or 2 keys)
+  └────────────────────────────────────────────────────────────────────────────────────
 ```
+
+The egress allowlist (`EGRESS_ROUTES`) is baked into the image, so it is part of PCR0. The parent
+could route a port somewhere else, but it can't present a valid certificate for these names, so
+the verifier refuses the connection: it can block results, not forge them.
 
 The API host can still `kms:Encrypt` (sealing new locks), refuse service, or delete things;
 the tlock fail-safe covers those cases. What it can't do is decrypt a stored key.
@@ -45,6 +54,9 @@ the tlock fail-safe covers those cases. What it can't do is decrypt a stored key
   - `condlock-escrow-instance`: the EC2 instance profile role. The API's Encrypt and the
     enclave's Decrypt both use its credentials.
   - `condlock-key-auditor`: read-only key access plus `ScheduleKeyDeletion`.
+- For 2-of-3 locks: a **second AWS account** with a different owner (step 4b).
+- For NFL locks: an API-Sports key (American Football API) and a TheSportsDB key (`123` is
+  their public free key).
 - A Rust toolchain to build the small `nsm-attest` helper (step 3).
 
 ## 1. Launch an enclave-enabled EC2 instance
@@ -130,7 +142,8 @@ CiphertextForRecipient it can open.
 ## 4. Create the KMS key with the locked-down policy
 
 Edit `services/escrow/enclave/key-policy.json`: set `ACCOUNT_ID`, the two role names, and
-`PCR0_HEX_FROM_NITRO_CLI_BUILD`. What it does:
+`PCR0_HEX_FROM_NITRO_CLI_BUILD`. Fill in `REPLACE_REGION` in the Dockerfile's `EGRESS_ROUTES`
+too, before step 2's build, since it changes PCR0. What the policy does:
 
 | Statement | Effect |
 |---|---|
@@ -176,13 +189,33 @@ aws kms decrypt --key-id <arn> --ciphertext-blob fileb://some.bin --encryption-c
   processes are outside this design. For keys that become unmanageable, AWS documents that you
   contact AWS Support.
 
+## 4b. The second share holder (2-of-3 locks)
+
+For 2-of-3 locks, share b needs a provider that the escrow account's admins don't control. The
+option that works with Nitro today is a KMS key in a **separate AWS account** owned by someone
+else (a friend, a lawyer, a second organization), with the same PCR0 policy and lockdown:
+
+1. In the second account, fill in `services/escrow/enclave/second-provider-key-policy.json`
+   (`ESCROW_ACCOUNT_ID`, `SECOND_ACCOUNT_ID`, PCR0) and create the key with
+   `--bypass-policy-lockout-safety-check`, exactly as in step 4.
+2. In the escrow account, give `condlock-escrow-instance` an IAM policy allowing `kms:Encrypt`
+   and `kms:Decrypt` on that key ARN (cross-account use needs both sides to allow it).
+3. Run the API with `KEY_SPLIT=2of3`, `SECOND_PROVIDER=aws`, `SECOND_KMS_KEY_ID=<that ARN>`.
+
+Inside the enclave, one attested KMS client decrypts both shares, using the key ARN stored with
+each. Other options and their trade-offs are in `services/escrow/README.md`.
+
 ## 5. Run it
 
 On the parent:
 
 ```sh
-# KMS reachability for the enclave (vsock 8000 → kms.<region>.amazonaws.com:443)
-vsock-proxy 8000 kms.us-east-1.amazonaws.com 443 &        # or: systemctl enable --now nitro-enclaves-vsock-proxy
+# Egress for the enclave: one vsock port per host. vsock-proxy only forwards to hosts in its
+# allowlist file, so add the two sports hosts to /etc/nitro_enclaves/vsock-proxy.yaml
+# ("- {address: v1.american-football.api-sports.io, port: 443}", same for www.thesportsdb.com).
+vsock-proxy 8000 kms.us-east-1.amazonaws.com 443 &
+vsock-proxy 8001 v1.american-football.api-sports.io 443 --config /etc/nitro_enclaves/vsock-proxy.yaml &
+vsock-proxy 8002 www.thesportsdb.com 443 --config /etc/nitro_enclaves/vsock-proxy.yaml &
 
 nitro-cli run-enclave --eif-path condlock-verifier-v1.eif --cpu-count 2 --memory 2048 --enclave-cid 16
 nitro-cli describe-enclaves          # State RUNNING, Flags NONE (not DEBUG_MODE)
@@ -193,17 +226,26 @@ socat UNIX-LISTEN:/run/condlock/verifier.sock,fork VSOCK-CONNECT:16:5005 &
 ```
 
 Run the API with `KMS_PROVIDER=aws`, `KMS_KEY_ID=<arn>`,
-`VERIFIER_SOCKET=/run/condlock/verifier.sock`, `DATABASE_URL=...` and `ESCROW_ADMIN_TOKEN=...`.
-The API encrypts with the instance role, and only the enclave can decrypt.
+`VERIFIER_SOCKET=/run/condlock/verifier.sock`, `CREDENTIAL_RELAY=1`, `APISPORTS_KEY=...`,
+`THESPORTSDB_KEY=...`, `DATABASE_URL=...` and `ESCROW_ADMIN_TOKEN=...` (plus the `KEY_SPLIT`
+variables from step 4b if you use 2-of-3). The API encrypts with the instance role, and only the
+enclave can decrypt.
 
-## Credentials (not implemented yet)
+## Credentials and API keys
 
 The enclave has no network and no instance metadata service, so it can't fetch the role's
-credentials itself. The usual approach is for the parent to read short-lived credentials from
-IMDS and hand them to the enclave over vsock, refreshing them before they expire. The parent
-already holds those credentials, and the key policy still requires attestation, so passing
-them grants nothing new. This plumbing is a follow-up. Until it exists, the enclave can't
-reach KMS, and the code only runs end to end against the mocks.
+credentials itself. With `CREDENTIAL_RELAY=1`, the API process reads the instance role's
+short-lived credentials (the AWS SDK default chain, which uses IMDS on EC2). It pushes them and
+the two sports API keys to the verifier over the verifier socket (`op: "secrets"`), then
+re-pushes 5 minutes before they expire, at least every 10 minutes, and every 15 seconds after a
+failure, for example while the enclave restarts. The verifier keeps them in memory only.
+
+This grants nothing new. The parent already holds these credentials, and the key policies still
+require the enclave's attestation to decrypt. A parent that pushes wrong or expired credentials
+can only cause a refusal of service, which it could cause anyway.
+
+AWS SigV4 signing and TLS certificate checks inside the enclave read the enclave's clock, which
+the Nitro hypervisor provides, not the parent. Neither one decides a release.
 
 ## Checks to run once it's up
 
@@ -216,10 +258,16 @@ reach KMS, and the code only runs end to end against the mocks.
    fails with `access-denied`.
 5. Edit a lock row's condition in Postgres (drop the trigger first, as an admin could): unlock
    fails with `unwrap-failed`, because the seal is in the encryption context.
+6. NFL: lock a vault on a game you know the result of, with `kickoffAt` in the past. Unlock
+   returns 200 for the winner, or 423 with `resolved: true` for the loser. Stop one vsock-proxy
+   (say 8002): unlock returns 503 `sources-unavailable`.
+7. 2-of-3: create a split lock with a guardian key. Temporarily deny the escrow role's IAM
+   access to the second key: unlock returns 503 `insufficient-shares`. Retry with the guardian's
+   share (`age -d -i guardian.key share.age | base64`): 200.
 
 ## Teardown
 
-Terminate the instance. Schedule the KMS key for deletion as the auditor role
+Terminate the instance. Schedule the KMS keys for deletion as the auditor role
 (`aws kms schedule-key-deletion --key-id <arn> --pending-window-in-days 7`) if you no longer
 need it; see the deletion note in step 4 first. Check the KMS and EC2 pricing pages for what
 you were billed.

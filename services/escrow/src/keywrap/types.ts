@@ -32,10 +32,21 @@ export interface WrappedKey {
   params?: Record<string, unknown>;
 }
 
+/** Per-lock inputs for layers that need them; single-key wrappers ignore these. */
+export interface WrapOptions {
+  /** A trusted person's age public key ("age1..."), for the 2-of-3 split's third share. */
+  guardianRecipient?: string;
+}
+
+export interface UnwrapOptions {
+  /** The guardian's decrypted share, supplied at unlock time when another holder is unavailable. */
+  guardianShare?: Uint8Array;
+}
+
 export interface KeyWrapper {
   readonly scheme: string;
-  wrap(plaintext: Uint8Array, context: WrapContext): Promise<WrappedKey>;
-  unwrap(wrapped: WrappedKey, context: WrapContext): Promise<Uint8Array>;
+  wrap(plaintext: Uint8Array, context: WrapContext, options?: WrapOptions): Promise<WrappedKey>;
+  unwrap(wrapped: WrappedKey, context: WrapContext, options?: UnwrapOptions): Promise<Uint8Array>;
 }
 
 /** The ciphertext doesn't open under this context or key (tampered, moved or wrong key). */
@@ -46,6 +57,11 @@ export class UnwrapError extends Error {
 /** The key policy refused this caller (e.g. no valid enclave attestation for the required PCR0). */
 export class KeyAccessDeniedError extends UnwrapError {
   override name = "KeyAccessDeniedError";
+}
+
+/** A wrapper input was invalid (e.g. a malformed guardian public key). Maps to 400. */
+export class WrapInputError extends Error {
+  override name = "WrapInputError";
 }
 
 /** The key service itself failed (network, permissions, throttling). Retry may help. */
@@ -83,14 +99,14 @@ export class KeyWrapRegistry {
     }
   }
 
-  async wrap(plaintext: Uint8Array, context: WrapContext): Promise<WrappedKey> {
-    return this.primary.wrap(plaintext, context);
+  async wrap(plaintext: Uint8Array, context: WrapContext, options?: WrapOptions): Promise<WrappedKey> {
+    return this.primary.wrap(plaintext, context, options);
   }
 
-  async unwrap(wrapped: WrappedKey, context: WrapContext): Promise<Uint8Array> {
+  async unwrap(wrapped: WrappedKey, context: WrapContext, options?: UnwrapOptions): Promise<Uint8Array> {
     const w = this.byScheme.get(wrapped.scheme);
     if (!w) throw new UnwrapError(`no key wrapper registered for scheme ${wrapped.scheme}`);
-    return w.unwrap(wrapped, context);
+    return w.unwrap(wrapped, context, options);
   }
 
   get schemes(): string[] {

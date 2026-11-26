@@ -20,14 +20,16 @@ COPY services/escrow/enclave/nsm-attest /usr/local/bin/nsm-attest
 COPY services/escrow/enclave/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/nsm-attest /usr/local/bin/entrypoint.sh
 
-# The region is baked in (it names the KMS host). The key ARN is NOT: the key policy needs this
-# image's PCR0 before the key exists, and the verifier decrypts with the key ID stored in each
-# wrapped key anyway (only ciphertext under the attested key is protected, which is the point).
+# The region and the egress allowlist are baked in, so they are part of PCR0: a parent can't add
+# a host. The key ARNs are NOT: the key policies need this image's PCR0 before the keys exist,
+# and the verifier decrypts with the key ID stored in each wrapped key (only ciphertext under
+# the attested keys is protected, which is the point).
 ENV AWS_REGION=REPLACE_REGION \
     NODE_ENV=production \
     VERIFIER_SOCKET=/tmp/condlock-verifier.sock \
     NSM_ATTEST_COMMAND=/usr/local/bin/nsm-attest \
     VERIFIER_VSOCK_PORT=5005 \
-    KMS_PROXY_VSOCK_PORT=8000
+    SECOND_PROVIDER=aws \
+    EGRESS_ROUTES=kms.REPLACE_REGION.amazonaws.com=127.0.0.1:8000,v1.american-football.api-sports.io=127.0.0.1:8001,www.thesportsdb.com=127.0.0.1:8002
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -17,7 +17,9 @@ by the owner alone.
 - **Escrow.** A small API with no "release" button. The DEK is wrapped with one AWS KMS
   key (encryption context = vault ID); only the service role may Decrypt. A scheduled
   verifier records "met" with evidence; unlock returns the DEK once, to a registered
-  device key. Append-only audit log.
+  device key. Append-only audit log. *(As built, milestones 4 and 5: Decrypt only in an
+  attested Nitro Enclave verifier that checks the condition at unlock time, plus an optional
+  2-of-3 split.)*
 - **Conditions (MVP).** Time-lock (server clock + drand round, plus a tlock copy that
   enforces time with no trust in the server) and NFL result (API-Sports and TheSportsDB
   must agree). Conditions are sealed; edits can only make a lock stricter.
@@ -42,7 +44,11 @@ by the owner alone.
    context), Ed25519 device signatures, append-only audit log, and an enclave-ready key-release
    verifier with attestation-bound KMS decrypt. Tested with mocks; real KMS and Nitro setup are
    manual ([ENCLAVE.md](ENCLAVE.md)). ✅
-5. Verifiers (time, nfl) on a 15-minute schedule.
+5. **Verifiers, egress, key split.** Time (drand) and NFL (API-Sports and TheSportsDB must agree;
+   sealed tie/postponed/cancelled rules) checked inside the verifier. The verifier makes its own
+   TLS connections out of the enclave over vsock, and AWS credentials and API keys are delivered
+   over the verifier channel. Optional 2-of-3 Shamir split across the KMS key, a second provider
+   and a guardian's age key. Tested with mocks; the live sports test is manual. ✅
 6. End to end against the deployed escrow, including cheat attempts.
 
 ## Core vault format (v1)
@@ -179,8 +185,7 @@ database, or copying a wrapped key to another vault, makes KMS refuse.
 BLS-verifies it against the pinned quicknet key. A time-lock is met once the beacon's round is at
 least `roundForTime(unlockAt)`, and the fail-safe once it is at least `roundForTime(failsafeAt)`.
 The server clock is used only for request freshness and for validating new locks (fail-safe at
-least 30 days and at most 10 years away, unlock in the future). NFL conditions wait for their
-milestone 5 verifier, and the fail-safe still applies to them.
+least 30 days and at most 10 years away, unlock in the future). NFL conditions: milestone 5.
 
 **Release.** After the verifier approves, a conditional `UPDATE ... WHERE status IN
 ('sealed','met')` moves the lock to `released` or `failsafe` atomically, so concurrent or repeat
@@ -213,8 +218,91 @@ The image is therefore frozen per key; see [ENCLAVE.md](ENCLAVE.md) for the trad
 setup.
 
 **Not done yet:**
-- delivering AWS credentials into the enclave;
 - the `nsm-attest` helper binary (a Rust sketch is in ENCLAVE.md);
 - end-to-end runs on real Nitro hardware.
 
-All are manual steps for you.
+Both are manual steps for you. Delivering AWS credentials into the enclave was done in
+milestone 5.
+
+## Verifiers, egress and the 2-of-3 split (v1, milestone 5)
+
+**Where conditions are checked.** All checks happen inside the key-release verifier, at unlock
+time, and the API host supplies no results. The order:
+1. A fail-safe that drand has reached releases the key without asking anyone else.
+2. A time condition compares drand rounds.
+3. An NFL condition runs `NflChecker`, with "now" taken from the verified drand beacon:
+   - **Before kickoff:** not met, and no API calls.
+   - **Fetching:** it calls API-Sports and TheSportsDB itself. If either fails:
+     `sources-unavailable` (503).
+   - **Same game:** both sources must report the sealed teams, and TheSportsDB's
+     `idAPIfootball` must match the sealed API-Sports ID.
+   - **Agreement:** both must report the same terminal state. If one lags, it waits. If they
+     conflict, it stays locked (`sourcesDisagree`).
+   - **Final:** scores must be equal. A tie follows `ifTie`; a win or loss for `team` opens the
+     lock if it's the sealed `outcome`.
+   - **Postponed / cancelled:** they follow `ifPostponed` (`wait` | `unlock` | `stay-locked`)
+     and `ifCancelled`.
+   - **Resolved outcomes:** if the result can never open the lock, the reply carries
+     `resolved: true`, and only the fail-safe opens it.
+
+Every rule is part of the condition, so it's part of the seal and of the KMS context.
+
+**NFL condition (v2 of the shape).** The fields are:
+- `game { apiSportsId, theSportsDbId, home, away, kickoffAt }`;
+- `team`, `outcome: win | loss`;
+- `ifTie`, `ifPostponed`, `ifCancelled`.
+
+This replaces the milestone 4 placeholder (a single `gameId`). No NFL locks were ever issued,
+so nothing needed migrating.
+
+**Egress.** The enclave's only way out is vsock.
+- `RoutedDialer` maps allowlisted `host:443` names to local ports. Each port goes over socat
+  and vsock to `vsock-proxy` on the parent, and from there to the host.
+- `EgressHttps` runs TLS inside the verifier, checked against Node's bundled CA roots (part of
+  PCR0), with SNI and hostname verification. The parent sees only ciphertext.
+- The allowlist itself (`EGRESS_ROUTES`) is baked into the image.
+- The AWS SDK uses the same path, through `NodeHttpHandler` with the egress agent.
+- Tests run real TLS with a throwaway CA through byte forwarders. They check that the forwarder
+  can't read keys or responses, and that a parent presenting its own CA, or a valid certificate
+  for another name, is rejected.
+
+**Credentials.** The parent's `startCredentialRelay` pushes `{ op: "secrets", aws, sports }` over
+the verifier socket:
+- the AWS part is the instance role's short-lived credentials, from the SDK default chain
+  (IMDS);
+- the sports part is the two API keys.
+
+The `SecretStore` keeps them in memory and feeds the SDK's credential provider and the sports
+clients. The relay re-pushes 5 minutes before expiry, at least every 10 minutes, and retries
+every 15 seconds after a failure. This grants nothing new: the key policies still require
+attestation.
+
+**2-of-3 split** (`ThresholdKeyWrapper`, scheme `shamir-2of3/v1`).
+- **Splitting:** `shamir-secret-sharing` (audited) splits the DEK into 3 shares with threshold 2.
+- **Holders:**
+  - share a: the escrow's KMS key (`KeyWrapper`);
+  - share b: a second provider (`KeyWrapper`; mocked, with real options documented);
+  - share c: the guardian, as age to their public key. `age-encryption` is the reference
+    TypeScript implementation, and X25519 and hybrid post-quantum recipients both work.
+- **Binding:** a and b are bound through each provider's context (vault + seal). c's plaintext
+  is `"CLG1" | vaultId | seal | share`.
+- **Commitment:** `HMAC-SHA256(dek, "condlock/shamir-2of3/v1/commit" | vaultId | seal)` lets
+  unwrap pick a pair of shares that rebuilds the right key.
+- **Unwrapping:** the verifier tries a and b. With fewer than two, it adds the guardian's share
+  from the request; still fewer than two is `insufficient-shares` (503), listing each holder's
+  outcome.
+- **Old locks:** the single-key wrapper stays registered, so old locks still unwrap. The tlock
+  fail-safe is unchanged.
+
+**Known limits.**
+- **The API host sees the DEK when a lock is created** (it's sent to `POST /locks`). That was
+  true in milestone 4 too. The split and the enclave protect the key at rest and at release,
+  not at creation.
+- **Collusion:** a guardian who colludes with the second provider's operator can rebuild the
+  key, if that provider isn't attestation-bound. That's inherent to "any two".
+- **Shares at unlock:** the guardian's decrypted share passes through the API host at unlock
+  time. It's one share, bound to one vault and its terms, and both other shares are
+  enclave-bound.
+- **Real-API checks:** the API-Sports parser follows the documented format and has only been
+  checked against mocks. TheSportsDB's matches its live API. The live test checks both with
+  your keys.

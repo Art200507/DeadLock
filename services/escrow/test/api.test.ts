@@ -15,12 +15,18 @@ async function events(h: Harness, vault: string) {
 
 const NFL = {
   type: "nfl",
-  gameId: "12345",
-  scheduledAt: "2026-12-07T18:00:00Z",
+  game: {
+    apiSportsId: "12345",
+    theSportsDbId: "2077001",
+    home: "Buffalo Bills",
+    away: "Miami Dolphins",
+    kickoffAt: "2026-12-07T18:00:00Z",
+  },
   team: "Buffalo Bills",
   outcome: "win",
   ifTie: "stay-locked",
-  ifPostponed: "stay-locked",
+  ifPostponed: "wait",
+  ifCancelled: "stay-locked",
 };
 
 describe("device registration", () => {
@@ -274,13 +280,13 @@ describe("POST /locks/:id/unlock (verifier decides from drand, API enforces once
     assert.equal(typeof log.json.entries[2].detail.drandRound, "number", "release records the drand round used");
   });
 
-  it("an NFL lock waits for its verifier, and a recorded 'met' alone doesn't release it", async () => {
+  it("an NFL lock with no NFL checker configured stays locked, and a recorded 'met' alone doesn't release it", async () => {
     const body = timeLockBody(h, { condition: NFL });
     await h.call("POST", "/locks", body);
-    await h.escrow.recordConditionMet(body.vaultId, { note: "milestone 5 verifier would put evidence here" });
+    await h.escrow.recordConditionMet(body.vaultId, { note: "a background job's note is not evidence" });
     const res = await h.call("POST", `/locks/${body.vaultId}/unlock`);
     assert.equal(res.status, 423);
-    assert.match(res.json.reason, /waiting for the nfl verifier/);
+    assert.match(res.json.reason, /no NFL checker configured/);
   });
 
   it("releases via the fail-safe once drand reaches the fail-safe round", async () => {

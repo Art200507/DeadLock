@@ -2,9 +2,11 @@
  * HTTP API (Hono). Every /locks route needs an Ed25519-signed request from a registered device.
  *
  *   POST /devices               register a device public key (admin token; setup only)
- *   POST /locks                 seal a lock: vault ID, condition, fail-safe, raw DEK (wrapped, never stored raw)
+ *   POST /locks                 seal a lock: vault ID, condition, fail-safe, raw DEK (wrapped, never stored raw),
+ *                               and for 2-of-3 escrows the guardian's age public key
  *   GET  /locks/:id             status, condition and the latest verifier result
- *   POST /locks/:id/unlock      the DEK, once, if met or past the fail-safe; else 423 "still locked"
+ *   POST /locks/:id/unlock      the DEK, once, if met or past the fail-safe; else 423 "still locked".
+ *                               Optional body { guardianShare } for 2-of-3 locks.
  *   GET  /locks/:id/log         the audit log
  *
  * No route edits or deletes a lock or its condition.
@@ -121,6 +123,7 @@ export function createApp({ escrow, adminToken }: AppOptions) {
       condition: body.condition,
       failsafeAt: body.failsafeAt,
       dek: body.dek,
+      guardian: body.guardian,
       deviceId: c.get("deviceId"),
     });
     return c.json(lock, 201);
@@ -129,9 +132,11 @@ export function createApp({ escrow, adminToken }: AppOptions) {
   app.get("/locks/:id", async (c) => c.json(await escrow.getLock(c.req.param("id"))));
 
   app.post("/locks/:id/unlock", async (c) => {
-    const { dek, via } = await escrow.unlock(c.req.param("id"), c.get("deviceId"));
+    const raw = c.get("body");
+    const body = raw ? parseJson(raw) : {};
+    const { dek, via, detail } = await escrow.unlock(c.req.param("id"), c.get("deviceId"), { guardianShare: body.guardianShare });
     try {
-      return c.json({ vaultId: c.req.param("id"), via, dek: Buffer.from(dek).toString("base64") });
+      return c.json({ vaultId: c.req.param("id"), via, dek: Buffer.from(dek).toString("base64"), ...(detail ? { detail } : {}) });
     } finally {
       dek.fill(0);
     }

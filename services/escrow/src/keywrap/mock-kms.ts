@@ -151,11 +151,15 @@ export class MockNsm implements AttestationProvider {
 
 /** KeyWrapper over a MockKmsService; with `attestation` it decrypts the enclave way (Recipient). */
 export class MockKms implements KeyWrapper {
-  readonly scheme = "mock-kms/v1";
+  /** "mock-kms/v1" by default; tests give the second share holder its own scheme name. */
+  readonly scheme: string;
   readonly service: MockKmsService;
   private readonly attestation: AttestationProvider | undefined;
 
-  constructor(opts: { service?: MockKmsService; attestation?: AttestationProvider; keyId?: string; masterKey?: Uint8Array } = {}) {
+  constructor(
+    opts: { service?: MockKmsService; attestation?: AttestationProvider; keyId?: string; masterKey?: Uint8Array; scheme?: string } = {},
+  ) {
+    this.scheme = opts.scheme ?? "mock-kms/v1";
     this.service =
       opts.service ??
       new MockKmsService({ ...(opts.keyId ? { keyId: opts.keyId } : {}), ...(opts.masterKey ? { masterKey: opts.masterKey } : {}) });

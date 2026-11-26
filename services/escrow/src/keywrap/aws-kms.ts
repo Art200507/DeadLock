@@ -8,7 +8,7 @@
  * key. A key policy conditioned on kms:RecipientAttestation:PCR0 then makes the key decryptable
  * only from that enclave image (see docs/ENCLAVE.md).
  */
-import { DecryptCommand, EncryptCommand, KMSClient } from "@aws-sdk/client-kms";
+import { DecryptCommand, EncryptCommand, KMSClient, type KMSClientConfig } from "@aws-sdk/client-kms";
 import { newRecipientKeyPair, openCiphertextForRecipient, type AttestationProvider } from "./recipient.js";
 import {
   KeyAccessDeniedError,
@@ -34,6 +34,10 @@ export interface AwsKmsOptions {
   client?: KmsSender;
   /** Inside an enclave: attest and decrypt via Recipient so the parent never sees plaintext. */
   attestation?: AttestationProvider;
+  /** Inside an enclave: the credentials the parent delivered (SecretStore.awsCredentials). */
+  credentials?: KMSClientConfig["credentials"];
+  /** Inside an enclave: a NodeHttpHandler on the egress agent, so TLS to KMS ends in the enclave. */
+  requestHandler?: KMSClientConfig["requestHandler"];
 }
 
 const CIPHERTEXT_ERRORS = new Set(["InvalidCiphertextException", "IncorrectKeyException"]);
@@ -50,7 +54,12 @@ export class AwsKms implements KeyWrapper {
     this.attestation = opts.attestation;
     this.client =
       opts.client ??
-      new KMSClient({ ...(opts.region ? { region: opts.region } : {}), ...(opts.endpoint ? { endpoint: opts.endpoint } : {}) });
+      new KMSClient({
+        ...(opts.region ? { region: opts.region } : {}),
+        ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
+        ...(opts.credentials ? { credentials: opts.credentials } : {}),
+        ...(opts.requestHandler ? { requestHandler: opts.requestHandler } : {}),
+      });
   }
 
   async wrap(plaintext: Uint8Array, context: WrapContext): Promise<WrappedKey> {

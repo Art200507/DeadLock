@@ -3,12 +3,19 @@
  *
  *  - InProcessReleaser: calls a verifier directly (tests, single-process dev). The request is
  *    round-tripped through JSON so nothing but plain data crosses, exactly as on a socket.
- *  - SocketReleaser / serveVerifier: one length-prefixed JSON frame each way over a stream
+ *  - SocketReleaser / pushSecrets / serveVerifier: one length-prefixed JSON frame each way over a stream
  *    socket (a Unix socket path or host:port). Node has no AF_VSOCK, so in production each side
  *    bridges to vsock with socat (see docs/ENCLAVE.md); the framing is unchanged.
  */
 import * as net from "node:net";
-import { MAX_FRAME_BYTES, type KeyReleaser, type ReleaseRequest, type ReleaseResponse } from "./protocol.js";
+import {
+  MAX_FRAME_BYTES,
+  type KeyReleaser,
+  type ReleaseRequest,
+  type ReleaseResponse,
+  type SecretsMessage,
+  type SecretsResponse,
+} from "./protocol.js";
 import type { KeyReleaseVerifier } from "./verifier.js";
 
 export type SocketTarget = { path: string } | { host: string; port: number };
@@ -64,33 +71,43 @@ function readFrame(sock: net.Socket, timeoutMs: number): Promise<unknown> {
   });
 }
 
-export class SocketReleaser implements KeyReleaser {
-  constructor(
-    private readonly target: SocketTarget,
-    private readonly timeoutMs = 15_000,
-  ) {}
-
-  async release(req: ReleaseRequest): Promise<ReleaseResponse> {
-    const sock = "path" in this.target ? net.createConnection(this.target.path) : net.createConnection(this.target.port, this.target.host);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        sock.once("connect", resolve);
-        sock.once("error", reject);
-      });
-      const reply = readFrame(sock, this.timeoutMs);
-      sock.write(frame(req));
-      return (await reply) as ReleaseResponse;
-    } finally {
-      sock.destroy();
-    }
+/** Send one frame, read one frame back. */
+async function exchange(target: SocketTarget, msg: unknown, timeoutMs: number): Promise<unknown> {
+  const sock = "path" in target ? net.createConnection(target.path) : net.createConnection(target.port, target.host);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      sock.once("connect", resolve);
+      sock.once("error", reject);
+    });
+    const reply = readFrame(sock, timeoutMs);
+    sock.write(frame(msg));
+    return await reply;
+  } finally {
+    sock.destroy();
   }
 }
 
-/** Serve a verifier: one request per connection. */
+export class SocketReleaser implements KeyReleaser {
+  constructor(
+    private readonly target: SocketTarget,
+    private readonly timeoutMs = 30_000,
+  ) {}
+
+  async release(req: ReleaseRequest): Promise<ReleaseResponse> {
+    return (await exchange(this.target, req, this.timeoutMs)) as ReleaseResponse;
+  }
+}
+
+/** Parent side: deliver credentials / API keys to the verifier over the same channel. */
+export async function pushSecrets(target: SocketTarget, msg: SecretsMessage, timeoutMs = 10_000): Promise<SecretsResponse> {
+  return (await exchange(target, msg, timeoutMs)) as SecretsResponse;
+}
+
+/** Serve a verifier: one message per connection (a release request or a secrets delivery). */
 export async function serveVerifier(verifier: KeyReleaseVerifier, target: SocketTarget): Promise<net.Server> {
   const server = net.createServer((sock) => {
-    readFrame(sock, 15_000)
-      .then((req) => verifier.release(req))
+    readFrame(sock, 30_000)
+      .then((req) => verifier.handle(req))
       .then(
         (res) => sock.end(frame(res)),
         () => sock.destroy(),

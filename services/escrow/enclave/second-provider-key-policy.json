@@ -1,0 +1,91 @@
+{
+  "Version": "2012-10-17",
+  "Id": "condition-lock-second-provider-key-v1",
+  "Statement": [
+    {
+      "Sid": "EscrowAccountMayEncryptShares",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ESCROW_ACCOUNT_ID:role/condlock-escrow-instance"
+      },
+      "Action": "kms:Encrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:EncryptionContext:app": "condition-lock"
+        }
+      }
+    },
+    {
+      "Sid": "OnlyTheAttestedEnclaveImageInTheEscrowAccountMayDecrypt",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ESCROW_ACCOUNT_ID:role/condlock-escrow-instance"
+      },
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:PCR0": "PCR0_HEX_FROM_NITRO_CLI_BUILD"
+        },
+        "StringEquals": {
+          "kms:EncryptionContext:app": "condition-lock"
+        }
+      }
+    },
+    {
+      "Sid": "EscrowAccountMayDescribeKey",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ESCROW_ACCOUNT_ID:role/condlock-escrow-instance"
+      },
+      "Action": "kms:DescribeKey",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecondAccountAuditorReadOnlyAndKeyRetirement",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::SECOND_ACCOUNT_ID:role/condlock-second-key-auditor"
+      },
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:ListGrants",
+        "kms:ListResourceTags",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NobodyMayChangeThisPolicyOrRouteAroundTheEnclave",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:CreateGrant",
+        "kms:ReEncryptFrom",
+        "kms:ReEncryptTo",
+        "kms:GenerateDataKey",
+        "kms:GenerateDataKeyWithoutPlaintext",
+        "kms:ImportKeyMaterial",
+        "kms:UpdateKeyDescription"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDecryptWithoutEnclaveAttestation",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "kms:RecipientAttestation:PCR0": "true"
+        }
+      }
+    }
+  ]
+}
