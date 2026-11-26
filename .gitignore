@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.DS_Store
+# secrets: never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# local vault output
+*.condlock/
