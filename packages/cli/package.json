@@ -1,14 +1,23 @@
 {
   "name": "@condlock/cli",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": { "condlock": "./dist/index.js" },
   "engines": { "node": ">=22" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo 'cli: no tests yet (milestone 3)'"
+    "condlock": "tsx --conditions=development src/index.ts",
+    "test": "tsx --conditions=development --test test/*.test.ts test/network/*.test.ts",
+    "test:offline": "CONDLOCK_OFFLINE=1 tsx --conditions=development --test test/*.test.ts test/network/*.test.ts"
   },
-  "dependencies": { "@condlock/core": "workspace:*" }
+  "dependencies": {
+    "@condlock/core": "workspace:*",
+    "drand-client": "1.2.5"
+  },
+  "devDependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0"
+  }
 }

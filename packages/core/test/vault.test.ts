@@ -14,6 +14,7 @@ import {
   generateDek,
   openVault,
   readManifest,
+  verifyVault,
 } from "../src/index.js";
 
 const MiB = 1024 * 1024;
@@ -221,5 +222,24 @@ describe("vault on disk", () => {
 
   it("refuses to create a vault over an existing directory", async () => {
     await assert.rejects(createVault({ inputs, vaultDir, dek }), /EEXIST/);
+  });
+});
+
+describe("verifyVault", () => {
+  it("passes on an intact vault without writing anything", async () => {
+    const before = await fsp.readdir(work);
+    const m = await verifyVault(vaultDir, dek);
+    assert.equal(m.entries.length, inputs.length);
+    assert.deepEqual(await fsp.readdir(work), before);
+  });
+
+  it("fails on a tampered vault or the wrong key", async () => {
+    const dir = await copyVault("verify");
+    const f = await dataFile(dir, "Game Saves");
+    const buf = await fsp.readFile(f);
+    buf[buf.length - 1]! ^= 1;
+    await fsp.writeFile(f, buf);
+    await assert.rejects(verifyVault(dir, dek), IntegrityError);
+    await assert.rejects(verifyVault(vaultDir, generateDek()), IntegrityError);
   });
 });

@@ -184,6 +184,38 @@ export async function openVault(opts: OpenVaultOptions): Promise<{ manifest: Man
   }
 }
 
+/**
+ * Decrypt every stream in the vault and check it against the manifest, writing nothing.
+ * Run this before deleting any originals: it proves the vault opens with this key.
+ */
+export async function verifyVault(vaultDir: string, dek: Uint8Array): Promise<Manifest> {
+  const header = await readVaultHeader(vaultDir);
+  const vaultIdBytes = fromHex(header.vaultId, ID_LENGTH);
+  const key = await importDek(dek);
+  const manifest = await decryptManifest(
+    new Uint8Array(await fsp.readFile(path.join(vaultDir, MANIFEST_FILE))),
+    key,
+    vaultIdBytes,
+  );
+  for (const e of manifest.entries) {
+    const hash = createHash("sha256");
+    let size = 0;
+    const plain = decryptStream(createReadStream(path.join(vaultDir, DATA_DIR, `${e.fileId}.bin`)), {
+      key,
+      vaultId: vaultIdBytes,
+      fileId: fromHex(e.fileId, ID_LENGTH),
+    });
+    for await (const c of plain) {
+      hash.update(c);
+      size += c.length;
+    }
+    if (size !== e.size || hash.digest("hex") !== e.sha256) {
+      throw new IntegrityError(`${e.name}: vault content does not match the manifest`);
+    }
+  }
+  return manifest;
+}
+
 // ---------- helpers ----------
 
 async function exists(p: string): Promise<boolean> {

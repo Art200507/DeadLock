@@ -36,7 +36,8 @@ by the owner alone.
    flipped byte, swapped chunks, wrong key. ✅
 2. **tlock** — wrap/unwrap of the DEK with tlock-js on drand quicknet; round-for-time
    math; tests for locked-then-open (real network), wrong round, tampering, mocked drand. ✅
-3. CLI, local only (lock, tlock fail-safe, shred, copies checklist, unlock via tlock).
+3. **CLI, local only** — `condlock lock | unlock | status | log`; tlock time-lock + fail-safe,
+   typed confirmation, verify-then-delete, copies checklist, hash-chained local log. ✅
 4. Escrow service (Hono, migrations, KMS, device signatures, audit log).
 5. Verifiers (time, nfl) on a 15-minute schedule.
 6. End to end against the deployed escrow, including cheat attempts.
@@ -100,3 +101,55 @@ The DEK is also wrapped with drand timelock encryption (tlock-js) to a future ro
   Tampering raises `IntegrityError`.
 - **Known risk:** if drand stopped publishing, rounds after that point could never be opened.
   The KMS escrow path is the second route.
+
+## CLI (v1, milestone 3)
+
+A locked vault folder (`<input>.condlock` next to the input by default, or `--vault <dir>`):
+
+```
+Holiday.condlock/
+  vault.json, manifest.enc, data/   from core (milestone 1)
+  keys/timelock.json                tlock envelope to the unlock time
+  keys/failsafe.json                tlock envelope to the fail-safe date
+  lock.json                         condition summary: rounds and times (no names)
+  log.jsonl                         local append-only log, hash-chained (no names)
+```
+
+**`lock`** does these steps in order. Nothing is deleted unless every step before it succeeded.
+
+1. Validate the inputs. It refuses the filesystem root, the home folder or anything containing
+   it, overlapping inputs, a vault inside what it locks, or an existing vault path.
+2. Take "now" from drand's latest verified round. If drand can't be reached, fall back to the
+   laptop clock with a warning; this is used only to turn durations like `10m` into a target.
+3. Work out the unlock and fail-safe rounds. The fail-safe defaults to 1 year (or the unlock
+   time, if that is later), must be at least 30 days away, and can't be earlier than the
+   unlock time.
+4. Show the inputs (with file counts and sizes), the vault path and both times, and require the
+   typed word `delete`. `--yes` skips this. If you decline, nothing is created and no key is
+   generated.
+5. Generate the DEK in memory. Create the vault, wrap both envelopes, write `lock.json`, then run
+   `verifyVault`, which decrypts every stream and checks its hash. Zero the DEK. If anything
+   fails, remove the partial vault and leave the originals untouched.
+6. Log `locked`, delete the originals with `rm` (not moved to the Trash), log
+   `originals-deleted`, and print the copies checklist.
+
+**`unlock`** tries the envelopes from the earliest round to the latest.
+- If drand has published a round, the vault is restored next to it (or to `--out`). Existing
+  files are never overwritten, and the DEK is zeroed.
+- If every round is still in the future, it prints `still locked until <time>` with the
+  rounds left, and exits 2.
+- If drand can't be reached, it exits 3 and changes nothing.
+
+Every attempt is logged.
+
+**`status`** shows the times, rounds and encrypted item count, and how many rounds drand has
+left (`--offline` skips the network). It never shows names.
+
+**`log`** prints the entries and verifies the hash chain. Each line holds the SHA-256 of the
+line before, so an edited or removed line is reported. Deleting or truncating the whole local
+file can't be prevented; the escrow's server-side audit log (milestone 4) covers that.
+
+**Key handling.** The DEK is never written to disk raw. Tests check every vault file for the
+key's raw, hex and base64 forms, and check that the key buffer is zeroed after `lock`. WebCrypto
+keeps its own internal copy of the imported key, which JavaScript can't wipe; the process exits
+right after.

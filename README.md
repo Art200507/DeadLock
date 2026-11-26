@@ -39,16 +39,42 @@ fail-safe date, so nothing is lost forever.
 |---|-----------|--------|
 | 1 | Core crypto: chunked AES-256-GCM, encrypted manifest, tar for folders | ✅ done |
 | 2 | tlock: wrap/unwrap the DEK on drand quicknet, round-for-time math | ✅ done |
-| 3 | CLI, local only: `condlock lock / unlock` with tlock fail-safe, shredding, copies checklist | ⏳ next |
-| 4 | Escrow service: Hono API, Postgres migrations, AWS KMS, device signatures, audit log | planned |
+| 3 | CLI, local only: `condlock lock / unlock / status / log` with tlock fail-safe, deletion, copies checklist | ✅ done |
+| 4 | Escrow service: Hono API, Postgres migrations, AWS KMS, device signatures, audit log | ⏳ next |
 | 5 | Verifiers: time (server clock + drand) and NFL (API-Sports + TheSportsDB must agree) | planned |
 | 6 | End to end against the deployed escrow, including cheat attempts | planned |
+
+## Using the CLI
+
+```sh
+pnpm install && pnpm build
+alias condlock="node $PWD/packages/cli/dist/index.js"
+
+condlock lock ~/Pictures/Holiday --until 2d              # or 10m, 1h30m, 2027-01-01T09:00Z
+condlock status ~/Pictures/Holiday.condlock
+condlock unlock ~/Pictures/Holiday.condlock              # "still locked until <time>" until drand says so
+condlock log ~/Pictures/Holiday.condlock
+```
+
+`lock` lists exactly what it will delete and asks you to type `delete` (`--yes` skips this,
+for scripts and tests). It then encrypts, writes a tlock key to the unlock time and a
+**fail-safe** tlock key (default 1 year, minimum 30 days, `--failsafe <time|duration>`), and
+decrypts the whole vault once to prove it opens. Only then does it delete the originals and
+print a checklist of places copies may still live (iCloud Photos, Google Photos, Time Machine,
+Downloads, chat apps). The data key exists only in memory and is zeroed after use. `unlock`
+asks drand, never the laptop clock.
+
+Exit codes: `0` ok · `1` error · `2` still locked · `3` drand unreachable (state unknown) ·
+`4` cancelled at the confirmation.
+
+> Milestone 3 is local only: a vault opens at its time through drand. The KMS escrow and
+> event conditions (NFL results) arrive in milestones 4 and 5.
 
 ## Repo layout
 
 ```
 packages/core      crypto: chunked AES-256-GCM vault, manifest, tlock wrap/unwrap
-packages/cli       condlock lock | unlock | status | log          (stub)
+packages/cli       condlock lock | unlock | status | log (local, tlock only)
 services/escrow    Hono API, verifiers, KMS + Postgres adapters   (stub)
 db/migrations      locks, devices, audit_log                      (stub)
 docs/DESIGN.md     design summary, vault and envelope formats
@@ -61,12 +87,14 @@ Requires Node 22+ and pnpm (`corepack enable`, or prefix commands with `npx pnpm
 ```sh
 pnpm install
 pnpm typecheck
-pnpm test                                   # everything, including real drand (~1 min)
-pnpm --filter @condlock/core test:offline   # skip network tests (CONDLOCK_OFFLINE=1)
+pnpm test                                   # everything, including real drand (~2 min)
+pnpm -r test:offline                        # skip network tests (CONDLOCK_OFFLINE=1)
 ```
 
-The network tests talk to the public drand quicknet. One locks a key for one minute, checks it
-reports "still locked until <time>", and polls drand until it opens. The offline suite uses a
+The network tests talk to the public drand quicknet. One in `core` and one in `cli` lock for one
+minute, check it reports "still locked until <time>", and poll drand until it opens; the CLI
+one restores a mixed folder (photo, PDF, video) and compares it byte for byte. Every CLI test
+works inside its own temp directory. The offline suite uses a
 mocked drand network that signs real BLS beacons with a throwaway key.
 
 ## Secrets

@@ -25,6 +25,7 @@ export {
   openVault,
   readManifest,
   readVaultHeader,
+  verifyVault,
   type CreateVaultOptions,
   type OpenVaultOptions,
   type VaultHeader,
