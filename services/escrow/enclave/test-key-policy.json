@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Id": "condition-lock-TEST-key (for test:real-kms only; never production)",
+  "Statement": [
+    {
+      "Sid": "AccountAdministersThisTestKey",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::ACCOUNT_ID:root" },
+      "Action": "kms:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "TesterMayEncryptAndDecryptForConditionLock",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::ACCOUNT_ID:user/YOUR_IAM_USER_OR_ROLE" },
+      "Action": ["kms:Encrypt", "kms:Decrypt"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "kms:EncryptionContext:app": "condition-lock" } }
+    }
+  ]
+}

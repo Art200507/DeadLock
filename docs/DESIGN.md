@@ -38,7 +38,10 @@ by the owner alone.
    math; tests for locked-then-open (real network), wrong round, tampering, mocked drand. ✅
 3. **CLI, local only** — `condlock lock | unlock | status | log`; tlock time-lock + fail-safe,
    typed confirmation, verify-then-delete, copies checklist, hash-chained local log. ✅
-4. Escrow service (Hono, migrations, KMS, device signatures, audit log).
+4. **Escrow service** — Hono API, Postgres migrations, KMS envelope wrapping (vault ID + seal as
+   context), Ed25519 device signatures, append-only audit log, and an enclave-ready key-release
+   verifier with attestation-bound KMS decrypt. Tested with mocks; real KMS and Nitro setup are
+   manual ([ENCLAVE.md](ENCLAVE.md)). ✅
 5. Verifiers (time, nfl) on a 15-minute schedule.
 6. End to end against the deployed escrow, including cheat attempts.
 
@@ -153,3 +156,65 @@ file can't be prevented; the escrow's server-side audit log (milestone 4) covers
 key's raw, hex and base64 forms, and check that the key buffer is zeroed after `lock`. WebCrypto
 keeps its own internal copy of the imported key, which JavaScript can't wipe; the process exits
 right after.
+
+## Escrow service (v1, milestone 4)
+
+**The split.** The API (untrusted host) and the key-release verifier (built to run inside an
+AWS Nitro Enclave) talk over one narrow request/response interface (`ReleaseRequest` →
+`ReleaseResponse`, length-prefixed JSON). It runs over vsock in production (bridged by socat),
+a Unix socket in tests, or in-process for local development.
+
+| | API (parent host) | Verifier (enclave) |
+|---|---|---|
+| KMS | `Encrypt` only (policy: context `app=condition-lock`) | `Decrypt` only, with Recipient attestation; policy pins PCR0 |
+| Holds | Postgres, audit log, device keys, "released once" | nothing: stateless, reads no clock |
+| Decides | request auth (Ed25519, ±5 min of server clock, single-use nonce) | whether the sealed terms are met |
+
+**The seal.** `seal = sha256(canonical { v:1, vaultId, condition, failsafeAt })` is part of the
+KMS encryption context: `{ app: "condition-lock", vaultId, seal }`. A wrapped key therefore only
+decrypts for exactly the terms it was sealed with. Editing the condition or fail-safe in the
+database, or copying a wrapped key to another vault, makes KMS refuse.
+
+**Time.** The verifier decides by drand alone. The API passes the latest beacon, and the verifier
+BLS-verifies it against the pinned quicknet key. A time-lock is met once the beacon's round is at
+least `roundForTime(unlockAt)`, and the fail-safe once it is at least `roundForTime(failsafeAt)`.
+The server clock is used only for request freshness and for validating new locks (fail-safe at
+least 30 days and at most 10 years away, unlock in the future). NFL conditions wait for their
+milestone 5 verifier, and the fail-safe still applies to them.
+
+**Release.** After the verifier approves, a conditional `UPDATE ... WHERE status IN
+('sealed','met')` moves the lock to `released` or `failsafe` atomically, so concurrent or repeat
+unlocks get `409`. Every request and outcome is audited: `unlock-requested`,
+`unlock-denied` (with a reason), `unlock-failed` (with a reason), `released` (with the drand
+round). `recordConditionMet` is bookkeeping for milestone 5 jobs; it doesn't release anything.
+
+**Database guards** (`db/migrations/001_init.sql`):
+- `audit_log` rejects UPDATE, DELETE and TRUNCATE.
+- Lock rows can't be deleted, sealed columns can't change, and status only moves
+  `sealed → met → released`, `sealed → released`, or `sealed|met → failsafe`.
+- `db/roles.sql` sets up a service role without owner rights, for production.
+
+**Key-wrapping seam.** `KeyWrapper { scheme, wrap(dek, ctx), unwrap(wrapped, ctx) }` plus a
+`KeyWrapRegistry` (a primary for new locks; unwrap picks by stored scheme). Implementations are
+`AwsKms` (optionally attestation-bound) and `MockKms`/`MockKmsService`/`MockNsm` for tests.
+Future layers (post-quantum hybrid, threshold or split-key) plug in as further wrappers.
+
+**Attestation-bound decrypt.** In the enclave, each decrypt generates an ephemeral RSA-2048 key
+and gets an NSM attestation document over it. It then calls `Decrypt` with
+`Recipient { RSAES_OAEP_SHA_256, AttestationDocument }`, receives `CiphertextForRecipient`
+(CMS EnvelopedData: RSAES-OAEP-SHA256 key transport, AES-256-CBC content), and opens it inside
+the enclave. The key policy (`services/escrow/enclave/key-policy.json`):
+- allows Decrypt only with `kms:RecipientAttestation:PCR0` equal to the image hash;
+- denies Decrypt without attestation;
+- denies `PutKeyPolicy`, `CreateGrant` and `ReEncrypt*` to everyone, root included (the key is
+  created with the lockout-check bypass).
+
+The image is therefore frozen per key; see [ENCLAVE.md](ENCLAVE.md) for the trade-offs and
+setup.
+
+**Not done yet:**
+- delivering AWS credentials into the enclave;
+- the `nsm-attest` helper binary (a Rust sketch is in ENCLAVE.md);
+- end-to-end runs on real Nitro hardware.
+
+All are manual steps for you.

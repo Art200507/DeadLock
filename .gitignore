@@ -11,3 +11,8 @@ coverage/
 *.key
 # local vault output
 *.condlock/
+
+# enclave build outputs
+services/escrow/enclave/build/
+services/escrow/enclave/nsm-attest
+*.eif

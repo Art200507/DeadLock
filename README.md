@@ -15,8 +15,8 @@ fail-safe date, so nothing is lost forever.
                          │
                          ├─► DEK wrapped by drand timelock (tlock)  ── opens when a drand round is published
                          │                                             (time-locks + every vault's fail-safe)
-                         └─► DEK wrapped by AWS KMS in the escrow   ── opens when a verifier records the
-                                                                       condition as met (NFL result, time)
+                         └─► DEK wrapped by AWS KMS in the escrow   ── released once by the enclave verifier
+                                                                       when the sealed condition is met
 ```
 
 1. **AES-256-GCM vault** (`packages/core`): files are streamed in 1 MiB chunks. Each chunk is
@@ -29,9 +29,13 @@ fail-safe date, so nothing is lost forever.
    can open it before the League of Entropy publishes that round, including the server and the
    owner. Unlock is decided only by whether drand has published the round; the laptop clock is
    never consulted.
-3. **KMS escrow** (`services/escrow`, planned): a small Hono API with no "release" button.
-   Verifiers check conditions on a schedule. Unlock returns the KMS-unwrapped DEK once, to a
-   registered device key, and every check and request goes in an append-only audit log.
+3. **KMS escrow** (`services/escrow`): a Hono API with no "release" button, Ed25519
+   device-signed requests, Postgres, and an append-only audit log. The API host can only
+   *encrypt*. Releasing a key is done by a separate **verifier**, built to run in an AWS Nitro
+   Enclave. It checks the sealed terms against a BLS-verified drand beacon, then calls KMS
+   Decrypt with an attestation-bound Recipient. A key policy pinned to the enclave image's PCR0
+   means nothing else can decrypt, and the key is released once. See
+   [services/escrow/README.md](services/escrow/README.md) and [docs/ENCLAVE.md](docs/ENCLAVE.md).
 
 ## Status
 
@@ -40,8 +44,8 @@ fail-safe date, so nothing is lost forever.
 | 1 | Core crypto: chunked AES-256-GCM, encrypted manifest, tar for folders | ✅ done |
 | 2 | tlock: wrap/unwrap the DEK on drand quicknet, round-for-time math | ✅ done |
 | 3 | CLI, local only: `condlock lock / unlock / status / log` with tlock fail-safe, deletion, copies checklist | ✅ done |
-| 4 | Escrow service: Hono API, Postgres migrations, AWS KMS, device signatures, audit log | ⏳ next |
-| 5 | Verifiers: time (server clock + drand) and NFL (API-Sports + TheSportsDB must agree) | planned |
+| 4 | Escrow service: Hono API, Postgres, KMS envelope wrapping, device signatures, audit log, enclave-ready verifier | ✅ done (mocks; real KMS and enclave are manual) |
+| 5 | Verifiers: time (server clock + drand) and NFL (API-Sports + TheSportsDB must agree) | ⏳ next |
 | 6 | End to end against the deployed escrow, including cheat attempts | planned |
 
 ## Using the CLI
@@ -75,9 +79,10 @@ Exit codes: `0` ok · `1` error · `2` still locked · `3` drand unreachable (st
 ```
 packages/core      crypto: chunked AES-256-GCM vault, manifest, tlock wrap/unwrap
 packages/cli       condlock lock | unlock | status | log (local, tlock only)
-services/escrow    Hono API, verifiers, KMS + Postgres adapters   (stub)
-db/migrations      locks, devices, audit_log                      (stub)
+services/escrow    Hono API, key-release verifier (enclave-ready), KMS + Postgres adapters
+db/migrations      locks, devices, audit_log, request_nonces + guard triggers
 docs/DESIGN.md     design summary, vault and envelope formats
+docs/ENCLAVE.md    Nitro Enclave + KMS key policy setup (manual runbook)
 ```
 
 ## Running the tests
@@ -89,6 +94,7 @@ pnpm install
 pnpm typecheck
 pnpm test                                   # everything, including real drand (~2 min)
 pnpm -r test:offline                        # skip network tests (CONDLOCK_OFFLINE=1)
+pnpm --filter @condlock/escrow test:real-kms   # manual: real AWS KMS, see services/escrow/README.md
 ```
 
 The network tests talk to the public drand quicknet. One in `core` and one in `cli` lock for one
@@ -97,7 +103,12 @@ one restores a mixed folder (photo, PDF, video) and compares it byte for byte. E
 works inside its own temp directory. The offline suite uses a
 mocked drand network that signs real BLS beacons with a throwaway key.
 
+The escrow tests run against PGlite (real Postgres in WASM), a mock KMS with a PCR0 key policy,
+a mock Nitro attestation, a mocked drand network and a real Unix socket. They need no cloud
+account. The one real-KMS test is manual and skipped unless you configure a test key.
+
 ## Secrets
 
 Cloud accounts and API keys (AWS, Neon/Supabase, API-Sports, TheSportsDB) are read from a `.env`
-file that is git-ignored and never committed. No keys live in this repo.
+file that is git-ignored and never committed (`services/escrow/.env.example` lists the
+variables). No keys live in this repo.
