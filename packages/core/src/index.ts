@@ -30,3 +30,22 @@ export {
   type VaultHeader,
 } from "./vault.js";
 export { fromHex, toHex } from "./bytes.js";
+export {
+  DrandUnavailableError,
+  QUICKNET,
+  QUICKNET_RELAYS,
+  StillLockedError,
+  chainFromInfo,
+  createDrandClient,
+  parseTlockEnvelope,
+  roundForTime,
+  serializeTlockEnvelope,
+  timeOfRound,
+  unwrapDek,
+  wrapDek,
+  type DrandChain,
+  type TlockEnvelope,
+  type UnwrapOptions,
+  type WrapOptions,
+  type WrapTarget,
+} from "./tlock.js";

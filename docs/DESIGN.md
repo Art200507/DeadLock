@@ -34,7 +34,8 @@ by the owner alone.
 
 1. **Core crypto** — chunked AES-256-GCM + encrypted manifest; tests for round-trip,
    flipped byte, swapped chunks, wrong key. ✅
-2. tlock wrap/unwrap of the DEK on drand quicknet.
+2. **tlock** — wrap/unwrap of the DEK with tlock-js on drand quicknet; round-for-time
+   math; tests for locked-then-open (real network), wrong round, tampering, mocked drand. ✅
 3. CLI, local only (lock, tlock fail-safe, shred, copies checklist, unlock via tlock).
 4. Escrow service (Hono, migrations, KMS, device signatures, audit log).
 5. Verifiers (time, nfl) on a 15-minute schedule.
@@ -62,3 +63,40 @@ stream ends with exactly one final record (an empty file is one empty final reco
 The manifest uses the same scheme with a reserved all-zero fileId. Decrypted output is
 written to a temporary file and only renamed into place after the whole stream
 authenticates.
+
+## Timelock envelope (v1, milestone 2)
+
+The DEK is also wrapped with drand timelock encryption (tlock-js) to a future round of
+**quicknet** (League of Entropy mainnet, 3 s rounds, `bls-unchained-g1-rfc9380`, chain hash
+`52db9ba7…e971`). The chain parameters are pinned in code and stored with each envelope:
+
+```json
+{
+  "format": "condlock-tlock", "version": 1,
+  "vaultId": "<hex>",
+  "round": 35330212,
+  "unlockAt": "2027-01-01T09:00:00.000Z",
+  "chain": { "hash", "publicKey", "period", "genesisTime", "schemeID", "beaconID", "groupHash" },
+  "ciphertext": "-----BEGIN AGE ENCRYPTED FILE----- ..."
+}
+```
+
+- **Sealed payload:** `"CLT1" | vaultId (16 B) | DEK (32 B)`, so an envelope can't be moved to
+  another vault.
+- **Round for a time:** the earliest round published at or after the target,
+  `ceil((t − genesis) / period) + 1`. This is pure arithmetic, so a lock never opens early.
+  `unlockAt` is that round's publish time.
+- **Wrapping is offline:** only the pinned chain public key is needed.
+- **Unwrapping never reads the laptop clock.** tlock-js's `timelockDecrypt` checks `Date.now()`,
+  so Condition Lock uses tlock-js's age and IBE modules with its own stanza handler instead.
+  That handler:
+  1. checks the stanza's round and chain hash against the envelope,
+  2. fetches the round's beacon and BLS-verifies it against the pinned public key,
+  3. decrypts with tlock-js IBE.
+
+  If the beacon is missing, it asks drand for the latest round. If the latest round is earlier,
+  it throws `StillLockedError` ("still locked until <time>"). If drand can't be reached or the
+  beacon fails verification, it throws `DrandUnavailableError` (state unknown, never "open").
+  Tampering raises `IntegrityError`.
+- **Known risk:** if drand stopped publishing, rounds after that point could never be opened.
+  The KMS escrow path is the second route.

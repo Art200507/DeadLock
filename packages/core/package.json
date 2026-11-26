@@ -6,18 +6,28 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts test/network/*.test.ts",
+    "test:offline": "CONDLOCK_OFFLINE=1 tsx --test test/*.test.ts test/network/*.test.ts"
   },
   "dependencies": {
-    "tar-stream": "^3.1.7"
+    "drand-client": "1.2.5",
+    "tar-stream": "^3.1.7",
+    "tlock-js": "0.9.0"
   },
   "devDependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0",
     "@types/tar-stream": "^3.1.3"
   }
 }
