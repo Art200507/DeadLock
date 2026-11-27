@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>DeadLock — Condition Lock</title>
 <style>
 :root{color-scheme:dark;--bg:#080a10;--text:#f3f4f0;--muted:#a2a9b8;--line:#292e3b;--lime:#dcff78;--mono:"SFMono-Regular",Consolas,monospace}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,sans-serif}button,a,input{font:inherit}button,a{color:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.45}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--lime);outline-offset:4px}a{text-decoration:none}.stage{position:sticky;top:0;height:100svh;overflow:hidden;isolation:isolate;background:#030405}.lock-canvas,.stars,.scan{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.stars{background-image:radial-gradient(circle,#bbc7e7 0 1px,transparent 1.4px),radial-gradient(circle,#61789f 0 1px,transparent 1.4px);background-size:143px 181px,91px 127px;background-position:20px 30px,60px 16px;opacity:.42}.scan{background:repeating-linear-gradient(0deg,#03050b45 0 1px,transparent 1px 4px);opacity:.5}.eyebrow{font:12px var(--mono);letter-spacing:.19em;color:var(--lime);text-transform:uppercase}.fallback{display:none;position:absolute;right:16%;top:34%;width:min(27vw,280px);text-align:center;font-size:clamp(72px,17vw,270px);line-height:1}.deck{padding:clamp(32px,7vw,100px) clamp(20px,7vw,110px);min-height:100svh;background:var(--bg);position:relative}.deck h2{font-size:clamp(45px,7vw,100px);letter-spacing:-.085em;line-height:1;margin:16px 0 20px}.deck p{color:var(--muted)}.deck-head,.toolbar,.card-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.toolbar{margin:30px 0 18px}.tabs{display:flex;gap:6px;flex-wrap:wrap}.btn,.tabs button{border:1px solid var(--line);background:transparent;padding:9px 13px;border-radius:3px}.btn.primary{background:var(--lime);color:#172009;border-color:transparent;font-weight:700}.tabs button[aria-pressed=true]{background:var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,290px),1fr));gap:16px}.card{display:block;text-align:left;width:100%;background:linear-gradient(145deg,#ffffff09,transparent);border:1px solid var(--line);padding:22px;border-radius:4px}.card:hover{border-color:#828b9e}.card h3{font-size:24px;margin:24px 0 0}.card p{margin:4px 0 20px}.badge,.readout,.small{font-family:var(--mono)}.badge{font-size:12px;border:1px solid var(--line);padding:4px 7px}.ready{color:var(--lime)}.readout{font-size:clamp(20px,3vw,34px);letter-spacing:-.05em}.small{font-size:13px;color:var(--muted)}.card footer{border-top:1px solid var(--line);margin-top:18px;padding-top:12px}.light{--bg:#eff0ec;--text:#161b21;--muted:#4a5563;--line:#c5cad0;--lime:#9dcc30;color-scheme:light}.light .deck .eyebrow,.light .ready{color:#456700}dialog{width:min(620px,calc(100% - 32px));max-height:90svh;overflow:auto;background:var(--bg);color:var(--text);border:1px solid var(--line);padding:24px}dialog::backdrop{background:#000b}dialog h3{margin:0 0 12px;font-size:28px}dialog label{display:block;margin:10px 0}input:not([type=checkbox]){max-width:100%;padding:8px;background:transparent;color:inherit;border:1px solid var(--line)}.rows{padding-left:22px}.rows li{margin:7px 0}.empty{border:1px dashed var(--line);padding:24px}.drop{border:1px dashed var(--line);padding:20px;margin:12px 0}.error{color:#ff8a82}.choices{display:flex;flex-wrap:wrap;gap:8px}.choices button{margin:4px 0}
@@ -136,6 +136,56 @@ dialog>.card-top{padding-bottom:12px;border-bottom:1px solid var(--line)}
 }
 @media(max-height:570px) and (min-width:691px){.station-screen{padding-block:13px}.station-display{width:min(100%,62svh);margin:auto}.station-copy h2{font-size:clamp(27px,6vw,68px)}}
 @media(prefers-reduced-motion:reduce){.station{height:auto}.station-screen{position:relative;top:auto}.station-display,.station-copy{transform:none}}
+
+@media(max-width:690px){
+  .flight{height:225svh}
+  .flight-controls{left:max(12px,env(safe-area-inset-left));right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;text-align:center}
+  #flight-state{grid-row:1;grid-column:1/-1;min-height:1.5em}
+  .flight-controls a,.flight-controls .motion{display:grid;place-items:center;min-height:44px;padding:7px;font-size:11px}
+  .flight-controls .motion[hidden],.station-tools button[hidden]{display:none}
+  .title-lockup{max-width:calc(100% - 32px)}
+  .title-word canvas{width:min(86vw,440px)}
+  .start-game,.station-action{min-height:48px;padding:12px 18px}
+  .selector{--dock-size:calc(62px + env(safe-area-inset-top))}
+  .station-nav{height:var(--dock-size);padding:env(safe-area-inset-top) max(8px,env(safe-area-inset-right)) 0 max(8px,env(safe-area-inset-left));gap:6px;white-space:nowrap}
+  .station-nav>div:first-of-type{flex:1;min-width:0;display:flex;flex-wrap:nowrap;justify-content:start;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin}
+  .station-nav a,.station-tools button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;flex-shrink:0}
+  .station-nav a{padding-inline:10px;font-size:12px}
+  .station-tools{flex-shrink:0;flex-wrap:nowrap!important;align-items:center}
+  .station-tools button{width:44px}
+  .station{height:127svh}
+  .station-screen{padding-inline:max(16px,env(safe-area-inset-left),env(safe-area-inset-right));gap:12px}
+  .station-display{width:min(84vw,39svh)}
+  .station-copy h2{text-wrap:balance}
+  .deck{padding:24px max(16px,env(safe-area-inset-left),env(safe-area-inset-right)) max(32px,env(safe-area-inset-bottom))}
+  .deck .toolbar{display:grid;gap:12px}
+  #filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  #new{width:100%}
+  .btn,.tabs button,.choices button{min-height:44px;font-size:14px}
+  .card{min-width:0;overflow-wrap:anywhere}
+  dialog{width:100%;max-width:none;max-height:calc(100dvh - env(safe-area-inset-top) - 12px);margin:auto 0 0;padding:0 max(16px,env(safe-area-inset-left),env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom));overscroll-behavior:contain;overflow-wrap:anywhere}
+  dialog>.card-top{position:sticky;top:0;z-index:1;background:var(--bg);padding-block:10px}
+  dialog h3{font-size:clamp(19px,5vw,24px);margin:0}
+  dialog fieldset{min-width:0}
+  dialog input:not([type=checkbox]){display:block;width:100%;min-width:0;min-height:44px;font-size:16px;margin-top:5px}
+  dialog input[type=checkbox]{width:20px;height:20px;vertical-align:middle}
+  dialog fieldset label{min-height:40px}
+  dialog .drop{padding:12px}
+  dialog .wizard-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(98px,1fr));margin-top:12px}
+}
+@media(max-height:490px) and (pointer:coarse){
+  .station{height:auto;min-height:100svh}
+  .station-screen{position:relative;top:auto;grid-template-columns:minmax(0,1fr) minmax(0,1fr);min-height:0}
+  .station-display{grid-row:auto;width:min(100%,56svh);margin:auto}
+  .station-copy h2{font-size:clamp(25px,5vw,45px)}
+  .station-copy p{line-height:1.4}
+  .title-lockup{top:44%}
+  .start-game{margin-top:9px}
+}
+@media(prefers-reduced-motion:reduce) and (max-width:690px){
+  .flight{height:100svh}.station{height:auto}.title-lockup{top:65%}
+}
+@media(pointer:coarse){.drop-hint{display:none}}
 </style>
 <main>
 <canvas class="stars" aria-hidden="true"></canvas>
@@ -428,7 +478,7 @@ try {
     float ring=length(st);
     const vec3 deadlockGreen=vec3(186.,241.,144.)/255.;
     vec3 backdrop=deadlockGreen*exp(-abs(ring-(.5+max(progress-.60,0.)*8.))*95.)*impact;
-    float wideFrame=max(1.,1.16*res.y/res.x);
+    float wideFrame=max(1.,.88*res.y/res.x);
     // The central ray follows the open bore at q.xy=(0,.06).
     vec3 ro=vec3(0.,mix(.57,-.20,aim),mix(4.72*wideFrame,-.78,push));
     vec3 ray=normalize(vec3(st,-mix(1.8,2.05,push)));
@@ -480,7 +530,8 @@ try {
   const angleUniform=gl.getUniformLocation(program,'angle');
   draw = (value,angle) => {
     const width=canvas.clientWidth,height=canvas.clientHeight;
-    const scale=Math.min(devicePixelRatio,.68,660/width,470/height);
+    if(width<1||height<1)return;
+    const scale=Math.min(devicePixelRatio,.68,660/width,(width<=690?315:470)/height);
     const w=Math.round(width*scale),h=Math.round(height*scale);
     if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;gl.viewport(0,0,w,h);}
     gl.uniform2f(resolution,w,h);
@@ -690,7 +741,7 @@ function queueFlight(){if(!frame)frame=requestAnimationFrame(renderFlight);}
 addEventListener('scroll',queueFlight,{passive:true});
 addEventListener('resize',queueFlight);
 addEventListener('pointermove',event=>{
-  if(reduced.matches)return;
+  if(reduced.matches||event.pointerType==='touch')return;
   pointer.x=event.clientX/Math.max(1,sky.clientWidth)*2-1;
   pointer.y=event.clientY/Math.max(1,sky.clientHeight)*2-1;
   queueFlight();
@@ -778,12 +829,13 @@ function wizard(){
   const steps=['Choose what to lock','Choose the condition','Set a fail-safe','Review and seal'];
   const fileList=draft.files.map(file=>`<li>${html(file.webkitRelativePath||file.name)}</li>`).join('');
   const content=[
-    `<div class="drop" id="drop">Drop files here or use a picker.<label>Files <input type="file" multiple id="files"></label><label>Folder <input type="file" webkitdirectory multiple id="folder"></label></div><p>${draft.files.length} files · ${size(total)}</p><label>Vault name <input id="label" value="${html(draft.label)}" maxlength="60" placeholder="My vault"></label>`,
+    `<div class="drop" id="drop"><span class="drop-hint">Drag files here or use a picker.</span><label>Choose files <input type="file" multiple id="files"></label><label>Folder <input type="file" webkitdirectory multiple id="folder"></label></div><p>${draft.files.length} files · ${size(total)}</p><label>Vault name <input id="label" value="${html(draft.label)}" maxlength="60" placeholder="My vault"></label>`,
     `<div class="choices"><button class="btn" aria-pressed="true">Time-lock</button><button class="btn" disabled>Sports result · upcoming</button><button class="btn" disabled>Number threshold · coming soon</button><button class="btn" disabled>AI-judged goal · coming soon</button></div><label>Opens at <input type="datetime-local" id="target" value="${draft.target}"></label><div class="choices" id="quick">${[[1,'1 hour'],[24,'1 day'],[168,'1 week'],[720,'1 month']].map(([h,label])=>`<button class="btn" data-hours="${h}">${label}</button>`).join('')}</div>`,
     `<p>The fail-safe opens the vault if the condition has not been met. Choose a date at least 30 days from today.</p><label>Fail-safe date <input type="datetime-local" id="failsafe" value="${draft.failsafe}"></label>`,
     `<p>Condition · ${formatDate(draft.target)}<br>Fail-safe · ${formatDate(draft.failsafe)}</p><p>Originals the desktop app would delete</p><ol class="rows">${fileList}</ol><label>Type <strong>LOCK</strong> to confirm <input id="confirm" autocomplete="off" value="${html(draft.confirmation)}"></label><fieldset><legend>Check for other copies</legend>${checks.map((c,i)=>`<label><input type="checkbox" value="${i}" ${draft.checks.includes(i)?'checked':''}> ${c}</label>`).join('')}</fieldset><p class="small">Simulating the seal leaves every original intact.</p>`
   ];
-  body.innerHTML=`<p class="eyebrow">Step ${step+1} of 4</p><h4>${steps[step]}</h4>${content[step]}<p id="form-error" class="error" role="alert"></p><div class="choices">${step?`<button class="btn" id="back">Back</button>`:''}<button class="btn primary" id="next">${step===3?'Simulate seal':'Continue'}</button></div>`;
+  body.innerHTML=`<p class="eyebrow">Step ${step+1} of 4</p><h4>${steps[step]}</h4>${content[step]}<p id="form-error" class="error" role="alert"></p><div class="choices wizard-actions">${step?`<button class="btn" id="back">Back</button>`:''}<button class="btn primary" id="next">${step===3?'Simulate seal':'Continue'}</button></div>`;
+  dialog.scrollTop=0;
   const setFiles=files=>{draft.files=Array.from(files);wizard();$('#next').focus();};
   if(step===0){
     $('#label').oninput=event=>draft.label=event.target.value;
@@ -808,7 +860,7 @@ function wizard(){
     if(step===2&&!(new Date(draft.failsafe)>=Date.now()+30*86400000))error='Choose a fail-safe at least 30 days from now.';
     if(step===2&&new Date(draft.failsafe)<new Date(draft.target))error='Choose a fail-safe on or after the opening time.';
     if(step===3&&(draft.confirmation!=='LOCK'||draft.checks.length!==checks.length))error='Type LOCK and check each item before continuing.';
-    if(error){$('#form-error').textContent=error;return;}
+    if(error){const message=$('#form-error');message.textContent=error;message.scrollIntoView({block:'nearest'});return;}
     if(step<3){draft.step++;wizard();$('#next').focus();return;}
     const created=new Date().toISOString();
     vaults.unshift({id:'DL-'+crypto.getRandomValues(new Uint32Array(1))[0].toString(16).toUpperCase().padStart(8,'0'),name:draft.label.trim()||'Untitled vault',state:'Locked',condition:'Opens on '+formatDate(draft.target),target:draft.target,clock:'Awaiting target round',failsafe:draft.failsafe,size:size(total),round:'Unassigned in preview',audit:[{time:created,event:'Created',result:'Demo vault sealed'}]});
