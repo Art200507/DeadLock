@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeadLock — Condition Lock</title>
+<style>
+:root{color-scheme:dark;--bg:#080a10;--text:#f3f4f0;--muted:#a2a9b8;--line:#292e3b;--lime:#dcff78;--mono:"SFMono-Regular",Consolas,monospace}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,sans-serif}button,a,input{font:inherit}button,a{color:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.45}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--lime);outline-offset:4px}a{text-decoration:none}.stage{position:sticky;top:0;height:100svh;overflow:hidden;isolation:isolate;background:#030405}.lock-canvas,.stars,.scan{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.stars{background-image:radial-gradient(circle,#bbc7e7 0 1px,transparent 1.4px),radial-gradient(circle,#61789f 0 1px,transparent 1.4px);background-size:143px 181px,91px 127px;background-position:20px 30px,60px 16px;opacity:.42}.scan{background:repeating-linear-gradient(0deg,#03050b45 0 1px,transparent 1px 4px);opacity:.5}.eyebrow{font:12px var(--mono);letter-spacing:.19em;color:var(--lime);text-transform:uppercase}.fallback{display:none;position:absolute;right:16%;top:34%;width:min(27vw,280px);text-align:center;font-size:clamp(72px,17vw,270px);line-height:1}.deck{padding:clamp(32px,7vw,100px) clamp(20px,7vw,110px);min-height:100svh;background:var(--bg);position:relative}.deck h2{font-size:clamp(45px,7vw,100px);letter-spacing:-.085em;line-height:1;margin:16px 0 20px}.deck p{color:var(--muted)}.deck-head,.toolbar,.card-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.toolbar{margin:30px 0 18px}.tabs{display:flex;gap:6px;flex-wrap:wrap}.btn,.tabs button{border:1px solid var(--line);background:transparent;padding:9px 13px;border-radius:3px}.btn.primary{background:var(--lime);color:#172009;border-color:transparent;font-weight:700}.tabs button[aria-pressed=true]{background:var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,290px),1fr));gap:16px}.card{display:block;text-align:left;width:100%;background:linear-gradient(145deg,#ffffff09,transparent);border:1px solid var(--line);padding:22px;border-radius:4px}.card:hover{border-color:#828b9e}.card h3{font-size:24px;margin:24px 0 0}.card p{margin:4px 0 20px}.badge,.readout,.small{font-family:var(--mono)}.badge{font-size:12px;border:1px solid var(--line);padding:4px 7px}.ready{color:var(--lime)}.readout{font-size:clamp(20px,3vw,34px);letter-spacing:-.05em}.small{font-size:13px;color:var(--muted)}.card footer{border-top:1px solid var(--line);margin-top:18px;padding-top:12px}.light{--bg:#eff0ec;--text:#161b21;--muted:#4a5563;--line:#c5cad0;--lime:#9dcc30;color-scheme:light}.light .deck .eyebrow,.light .ready{color:#456700}dialog{width:min(620px,calc(100% - 32px));max-height:90svh;overflow:auto;background:var(--bg);color:var(--text);border:1px solid var(--line);padding:24px}dialog::backdrop{background:#000b}dialog h3{margin:0 0 12px;font-size:28px}dialog label{display:block;margin:10px 0}input:not([type=checkbox]){max-width:100%;padding:8px;background:transparent;color:inherit;border:1px solid var(--line)}.rows{padding-left:22px}.rows li{margin:7px 0}.empty{border:1px dashed var(--line);padding:24px}.drop{border:1px dashed var(--line);padding:20px;margin:12px 0}.error{color:#ff8a82}.choices{display:flex;flex-wrap:wrap;gap:8px}.choices button{margin:4px 0}
+@media(max-width:650px){.fallback{top:52%}}@media(prefers-reduced-motion:reduce){.flight{height:100svh}} 
+
+/* Arcade treatment lives in the intro. */
+.stage{--arcade:#76f5ff}
+.stars{background:none;opacity:1;image-rendering:pixelated}
+
+.lock-canvas{z-index:2;image-rendering:pixelated}
+.scan{z-index:3}
+
+
+
+
+.motion{padding:5px 8px;background:#0a1129;border:1px solid #59618d;color:#daf9ff;font:inherit}
+.fallback{perspective:650px;top:29%;right:15%;width:clamp(125px,23vw,330px);aspect-ratio:1}
+.fallback-lock{position:absolute;inset:0;transform-style:preserve-3d;transform:rotateY(var(--turn)) scale(var(--approach,1));}
+.fallback-face{position:absolute;bottom:0;left:3%;width:94%;height:62%;transform:translateZ(18px);display:grid;place-items:center;font:700 clamp(22px,6vw,80px) var(--mono);color:#1a2317}
+.fallback-back{transform:translateZ(-18px);}
+.fallback-edge{position:absolute;bottom:4%;width:36px;height:54%;left:calc(3% - 18px);transform:rotateY(90deg)}
+.fallback-edge.right{left:auto;right:calc(3% - 18px)}
+.fallback-shackle{position:absolute;width:59%;height:59%;left:20.5%;top:2%;border:clamp(8px,1.6vw,21px) solid #242923;border-bottom:0;border-radius:50% 50% 0 0;transform:translateY(var(--seat))}
+
+
+.fallback-face,.fallback-back{border:4px solid #526740;border-radius:0;background:linear-gradient(128deg,#272b26,#090b09 64%,#151a13);box-shadow:inset 0 0 0 5px #121610;clip-path:polygon(0 14%,8% 14%,8% 0,92% 0,92% 14%,100% 14%,100% 86%,92% 86%,92% 100%,8% 100%,8% 86%,0 86%);}
+.fallback-edge{background:#161b14;height:41%;bottom:10%;}
+.fallback-shackle{border-color:#242923;border-radius:18% 18% 0 0;box-shadow:inset 3px 0 #424a3d,0 -2px #7b9e60;}
+.fallback-keyway{width:32%;height:64%;background:#131812;border:2px solid var(--arcade-green);border-radius:0;position:relative;}
+.fallback-keyway::before{position:absolute;content:"";width:53%;height:39%;left:23.5%;top:19%;background:#030503;clip-path:polygon(0 24%,20% 24%,20% 0,80% 0,80% 24%,100% 24%,100% 77%,80% 77%,80% 100%,20% 100%,20% 77%,0 77%);}
+.fallback-keyway::after{position:absolute;content:"";width:21%;height:44%;left:39.5%;bottom:17%;background:#030503;}
+
+.stage{background:#030405}
+.stage .scan{opacity:.5}
+.fallback{top:50%;left:50%;right:auto;transform:translate(-50%,-50%);width:clamp(145px,min(39vw,48svh),440px)}
+.flight-controls{position:absolute;z-index:5;left:clamp(12px,4vw,64px);right:clamp(12px,4vw,64px);bottom:24px;display:flex;justify-content:space-between;align-items:center;gap:8px;color:#c0c8df;font:11px var(--mono);text-transform:uppercase;letter-spacing:.08em}
+.flight-controls a{padding:6px;border:1px solid #394462}
+.flight-controls button{font:inherit;letter-spacing:inherit}
+.flight{height:285svh}
+.title-lockup{position:absolute;z-index:4;top:50%;left:50%;width:max-content;max-width:94%;text-align:center;pointer-events:none;opacity:var(--title-opacity,0);transform:translate(-50%,calc(-50% + var(--title-rise,22px))) scale(var(--title-scale,.91))}
+.title-word{margin:0;line-height:1}
+.title-word canvas{display:block;clip-path:inset(0 calc((1 - var(--title-scan,0)) * 50%) 0 calc((1 - var(--title-scan,0)) * 50%));width:min(82vw,720px);height:auto;image-rendering:pixelated}
+.title-lockup p{margin:13px 0 0;color:#acbcb5;font:clamp(12px,1.6vw,17px)/1.5 var(--mono)}
+.flight-controls{color:#a8bcb4}
+.flight-controls a,.flight-controls .motion{border:1px solid #344a43;background:#030605;border-radius:0;color:#c6ded2}
+html:not(.light){--bg:#090d0c;--line:#31453d;--text:#e2eee7;--muted:#a4b8ae;--lime:#bee88a}
+.deck,.deck h2,.card h3{font-family:var(--mono)}
+.deck h2{font-size:clamp(34px,6vw,80px);letter-spacing:-.065em}
+.card,.btn,.tabs button{border-radius:0}
+.card{background:transparent}
+.card:hover,.card:focus-visible{border-color:var(--lime)}
+@media(max-height:550px){.title-word canvas{width:min(68vw,510px)}.title-lockup p{margin-top:8px}}
+@media(prefers-reduced-motion:reduce){.flight{height:100svh}.lock-canvas{transform:translateY(-14%) scale(.72)}.title-lockup{top:73%;opacity:1;--title-scan:1;transform:translate(-50%,-50%)}}
+
+main{position:relative;isolation:isolate}
+.stars{position:fixed;z-index:-1}
+.stage{background:transparent}
+.flight{height:345svh}
+html:not(.light) .deck{background:#07100ee8;border-top:1px solid #496b61}
+@media(prefers-reduced-motion:reduce){.flight{height:100svh}}
+
+:root{--arcade-amber:#f2d58d;--arcade-green:#baf190;--arcade-cyan:#72dce2}
+.title-lockup p{color:#d0ddd2;letter-spacing:.035em}
+.title-word canvas{filter:drop-shadow(0 0 14px #89da922a)}
+.flight-controls a,.flight-controls .motion{border-color:#486770;background:#061114;box-shadow:2px 2px #10272a}
+.flight-controls a:hover,.flight-controls .motion:hover{color:var(--arcade-amber);border-color:currentColor}
+
+
+html:not(.light){--bg:#071113;--line:#325761;--text:#eef4db;--muted:#b2c6c2;--lime:#baf190}
+html:not(.light) .deck{background:#071113ed;border-top:2px solid #518e92}
+.deck h2{font-weight:900;text-transform:uppercase;text-shadow:3px 3px #377576}
+.light .deck h2{text-shadow:2px 2px #d1deda}
+.deck-head{padding-bottom:12px;border-bottom:1px solid var(--line)}
+.deck-head .eyebrow{font-weight:700;letter-spacing:.11em}
+.btn,.tabs button{font-family:var(--mono);box-shadow:inset 0 -3px 0 #778c8e20;min-height:42px}
+.btn.primary{box-shadow:inset 0 -4px 0 #234c4760;text-transform:uppercase}
+.tabs button[aria-pressed=true]{border-color:var(--line);box-shadow:inset 0 -3px 0 var(--lime)}
+.card{position:relative;background:var(--bg);box-shadow:inset 0 0 0 3px var(--bg),inset 0 0 0 4px var(--line);padding:24px}
+.card::before,.card::after{content:"";position:absolute;top:7px;width:7px;height:7px;background:var(--line)}
+.card::before{left:7px}.card::after{right:7px}
+.card:hover::before,.card:hover::after{background:var(--lime)}
+.card .readout{padding:6px 10px;border:1px solid var(--line);box-shadow:inset 0 2px 0 #345d5e33}
+html:not(.light) .card .readout{color:var(--arcade-amber);background:#040b0d}
+dialog{border:2px solid var(--line);box-shadow:5px 5px 0 #294f54}
+dialog h3,dialog h4{font-family:var(--mono)}
+dialog>.card-top{padding-bottom:12px;border-bottom:1px solid var(--line)}
+
+
+@media(max-width:690px){
+ 
+ 
+ .deck .toolbar{align-items:flex-start}
+ .card{padding:21px}
+}
+
+
+.start-game,.station-action{display:inline-block;padding:11px 19px;background:#baf190;color:#152015;border:2px solid #e3ffac;box-shadow:inset 0 -4px #729a54,4px 4px #224b45;font:800 14px var(--mono);letter-spacing:.07em;text-transform:uppercase;pointer-events:auto}
+.start-game{margin-top:19px}
+.start-game[inert]{visibility:hidden}
+@media(prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+.start-game:hover,.station-action:hover{background:#d9ffad;box-shadow:inset 0 -4px #87aa63,4px 4px #3f786c}
+.start-game:active,.station-action:active{transform:translate(2px,2px)}
+.selector{position:relative;--dock-size:68px}
+.station-nav{position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:var(--dock-size);padding:8px clamp(16px,5vw,76px);border-top:1px solid #345c63;border-bottom:2px solid #345c63;background:#071014f5;font:700 12px var(--mono);color:#e8daaa;letter-spacing:.055em}
+.station-nav div{display:flex;gap:4px;flex-wrap:wrap;justify-content:center}
+.station-tools button{border:1px solid #486770;background:#0e2225;color:#aad2c9;min-width:29px;min-height:30px;font:700 13px var(--mono)}
+.station-nav a{padding:7px 9px;color:#aad2c9;border-bottom:2px solid transparent}
+.station-nav a:hover,.station-nav a[aria-current]{color:#dbffb5;border-color:#baf190;background:#223a2e}
+.station{height:148svh;scroll-margin-top:var(--dock-size);--station-tint:#baf190;--station-rgb:168 247 136}
+.station-sports{--station-tint:#f4cb83;--station-rgb:238 171 96}
+.station-threshold{--station-tint:#78ddea;--station-rgb:93 203 223}
+.station-goal{--station-tint:#c4ff9b;--station-rgb:149 223 133}
+.station-screen{min-height:calc(100svh - var(--dock-size));position:sticky;top:var(--dock-size);display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);align-items:center;gap:clamp(16px,4vw,66px);max-width:1550px;margin:auto;padding:clamp(20px,6vw,104px);--arrival:1}
+.station-copy{transform:translateY(calc(21px * (1 - var(--arrival))));max-width:35rem}
+.station-copy h2{margin:12px 0 14px;color:var(--station-tint);font:950 clamp(34px,6.1vw,99px)/.89 var(--mono);letter-spacing:-.085em;text-shadow:4px 4px #263d37;text-wrap:balance}
+.station-copy p{max-width:40ch;color:#c4d6cf;font:clamp(14px,1.4vw,18px)/1.6 var(--mono);margin:9px 0}
+.station-copy .station-hook{color:#f8eac6;font-weight:800}
+.station-status{display:inline-block;color:var(--station-tint);border:1px solid currentColor;background:#060e12;padding:4px 7px;font:700 11px var(--mono);letter-spacing:.12em;text-transform:uppercase}
+.station-action{margin-top:16px}
+.station-display{position:relative;isolation:isolate;display:grid;place-items:center;aspect-ratio:1.23;max-width:650px;width:100%;transform:translateY(calc(26px * (1 - var(--arrival)))) scale(calc(.9 + .1 * var(--arrival)))}
+.station-display::before{content:"";position:absolute;inset:5%;background:radial-gradient(ellipse,rgb(var(--station-rgb) / .14),transparent 65%);pointer-events:none}
+.station-grid{position:absolute;inset:5%;border:1px solid rgb(var(--station-rgb) / .32);clip-path:polygon(0 0,15% 0,15% 8%,85% 8%,85% 0,100% 0,100% 18%,93% 18%,93% 82%,100% 82%,100% 100%,85% 100%,85% 92%,15% 92%,15% 100%,0 100%,0 82%,7% 82%,7% 18%,0 18%)}
+.station-ring{position:absolute;width:72%;height:28%;top:64%;border:1px solid rgb(var(--station-rgb) / .37);border-radius:50%;box-shadow:0 0 0 7px rgb(var(--station-rgb) / .07),0 0 0 17px rgb(var(--station-rgb) / .035)}
+.station-model{position:relative;display:block;width:100%;height:auto;image-rendering:pixelated;filter:drop-shadow(0 15px 22px rgb(var(--station-rgb) / .28))}
+@media(max-width:690px){
+ .selector{--dock-size:52px}
+ .station-nav{padding-inline:8px;gap:3px;font-size:11px;letter-spacing:0}
+ .station-nav>span{display:none}.station-nav a{padding:7px 6px}
+ .station-screen{grid-template-columns:1fr;gap:5px;align-content:center;padding:12px 7vw 20px}
+ .station-display{width:min(82vw,43svh);grid-row:1;margin:auto}
+ .station-copy h2{font-size:clamp(30px,8vw,52px);margin:8px 0}
+}
+@media(max-height:570px) and (min-width:691px){.station-screen{padding-block:13px}.station-display{width:min(100%,62svh);margin:auto}.station-copy h2{font-size:clamp(27px,6vw,68px)}}
+@media(prefers-reduced-motion:reduce){.station{height:auto}.station-screen{position:relative;top:auto}.station-display,.station-copy{transform:none}}
+</style>
+<main>
+<canvas class="stars" aria-hidden="true"></canvas>
+<section class="flight" aria-label="DeadLock introduction">
+<div class="stage">
+<canvas class="lock-canvas" aria-hidden="true"></canvas><div class="scan"></div>
+<div class="fallback" aria-hidden="true"><div class="fallback-lock"><div class="fallback-shackle"></div><div class="fallback-face fallback-back"></div><div class="fallback-edge"></div><div class="fallback-edge right"></div><div class="fallback-face"><span class="fallback-keyway"></span></div></div></div>
+<div class="flight-controls">
+ <a href="#vaults">Skip to vaults</a>
+ <span id="flight-state">Scroll to seal</span>
+ <button class="motion" type="button">Pause idle spin</button>
+</div>
+<div class="title-lockup">
+ <h1 class="title-word" aria-label="DeadLock"><canvas id="pixel-title" width="49" height="11" aria-hidden="true">DEADLOCK</canvas></h1>
+ <p>Seal files until your condition is met.</p>
+ <a class="start-game" href="#lock-types" inert>Get started</a>
+</div>
+</div>
+</section>
+<div class="selector" id="lock-types">
+ <nav class="station-nav" aria-label="Lock types">
+  <span>CHOOSE A LOCK</span>
+  <div><a href="#time-lock">Time</a><a href="#sports-lock">Sports</a><a href="#threshold-lock">Threshold</a><a href="#goal-lock">AI goal</a></div>
+  <div class="station-tools"><button id="station-motion" type="button" aria-label="Pause idle spin" title="Pause idle spin">Ⅱ</button><a class="station-vaults" href="#vaults">Vaults</a></div>
+ </nav>
+<section class="station station-time" id="time-lock" aria-labelledby="time-title">
+ <div class="station-screen">
+  <div class="station-copy">
+   <span class="station-status">Available</span>
+   <h2 id="time-title">TIME LOCK</h2>
+   <p class="station-hook">The clock holds the key.</p>
+   <p>Choose a date and time. Your vault waits for the verified drand round.</p>
+   <button class="station-action" id="choose-time" type="button">Use time lock</button>
+  </div>
+  <div class="station-display" aria-hidden="true">
+   <div class="station-grid"></div>
+   <div class="station-ring"></div>
+   <canvas class="station-model" data-model="time" width="400" height="320"></canvas>
+  </div>
+ </div>
+</section>
+<section class="station station-sports" id="sports-lock" aria-labelledby="sports-title">
+ <div class="station-screen">
+  <div class="station-copy">
+   <span class="station-status">Planned</span>
+   <h2 id="sports-title">SPORTS LOCK</h2>
+   <p class="station-hook">The final score decides.</p>
+   <p>Pick a team and seal a vault until a verified game result meets your condition.</p>
+   
+  </div>
+  <div class="station-display" aria-hidden="true">
+   <div class="station-grid"></div>
+   <div class="station-ring"></div>
+   <canvas class="station-model" data-model="sports" width="400" height="320"></canvas>
+  </div>
+ </div>
+</section>
+<section class="station station-threshold" id="threshold-lock" aria-labelledby="threshold-title">
+ <div class="station-screen">
+  <div class="station-copy">
+   <span class="station-status">Coming soon</span>
+   <h2 id="threshold-title">THRESHOLD LOCK</h2>
+   <p class="station-hook">The number has to move.</p>
+   <p>Set a metric and a target. The vault waits until the source confirms the threshold.</p>
+   
+  </div>
+  <div class="station-display" aria-hidden="true">
+   <div class="station-grid"></div>
+   <div class="station-ring"></div>
+   <canvas class="station-model" data-model="threshold" width="400" height="320"></canvas>
+  </div>
+ </div>
+</section>
+<section class="station station-goal" id="goal-lock" aria-labelledby="goal-title">
+ <div class="station-screen">
+  <div class="station-copy">
+   <span class="station-status">Coming soon</span>
+   <h2 id="goal-title">AI-JUDGED GOAL</h2>
+   <p class="station-hook">The evidence earns release.</p>
+   <p>Seal the rubric up front. Submit evidence for review against the criteria you chose.</p>
+   
+  </div>
+  <div class="station-display" aria-hidden="true">
+   <div class="station-grid"></div>
+   <div class="station-ring"></div>
+   <canvas class="station-model" data-model="goal" width="400" height="320"></canvas>
+  </div>
+ </div>
+</section>
+</div>
+<section id="vaults" class="deck">
+<div class="deck-head"><span class="eyebrow">DeadLock · Vault console</span><button class="btn" id="theme">Light mode</button></div>
+<h2>Your vaults</h2><p>Sample data. File selections stay in this tab.</p>
+<div class="toolbar"><div class="tabs" id="filters" aria-label="Vault filters"></div><button class="btn primary" id="new">New lock</button></div>
+<div class="grid" id="cards"></div>
+</section>
+</main>
+<dialog id="panel" aria-labelledby="dialog-title"><div class="card-top"><h3 id="dialog-title"></h3><form method="dialog"><button class="btn" aria-label="Close dialog">Close</button></form></div><div id="panel-body"></div></dialog>
+<script>
+const $ = selector => document.querySelector(selector);
+const canvas = $('.lock-canvas');
+const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+const smooth = (a,b,v) => {const x=Math.min(1,Math.max(0,(v-a)/(b-a)));return x*x*(3-2*x)};
+const motion = $('.motion');
+const stationMotion = $('#station-motion');
+const fullTurn=2*Math.PI;
+const alignStart=.31, alignEnd=.51;
+let paused = reduced.matches, orbit = -.58, lastFrame = null;
+function lockAngle(progress){
+  if(reduced.matches||progress>=alignEnd)return 0;
+  const spin=orbit+fullTurn*smooth(.025,alignStart,progress);
+  if(progress<=alignStart)return spin;
+  // Finish in the same direction and stop face-on before entering the bore.
+  const front=Math.ceil(spin/fullTurn)*fullTurn;
+  return spin+(front-spin)*smooth(alignStart,alignEnd,progress);
+}
+let draw = ()=>{};
+const sky=$('.stars');
+const skyInk=sky.getContext('2d');
+const pointer={x:0,y:0};
+const random=index=>{
+  const number=Math.sin(index*127.1+311.7)*43758.5453;
+  return number-Math.floor(number);
+};
+const sparks=Array.from({length:185},(_,i)=>({
+  x:random(i*5)*2-1,y:random(i*5+1)*2-1,depth:random(i*5+2),
+  tint:i%13===0?3:i%5===0?2:i%3===0?1:0,size:i%19===0?2:1,
+}));
+const starColors=['#355b63','#63c4cc','#bbef8a','#ffe1a1'];
+let lastSkyFrame;
+function renderSky(progress,worldTravel){
+  if(!skyInk)return;
+  const width=Math.max(1,Math.round(sky.clientWidth/3));
+  const height=Math.max(1,Math.round(sky.clientHeight/3));
+  const key=[width,height,progress,worldTravel,pointer.x,pointer.y].join(',');
+  if(key===lastSkyFrame)return;
+  lastSkyFrame=key;
+  if(sky.width!==width||sky.height!==height){sky.width=width;sky.height=height;}
+  skyInk.fillStyle='#030609';
+  skyInk.fillRect(0,0,width,height);
+  const driftX=pointer.x*width*.055,driftY=pointer.y*height*.062;
+  const rush=smooth(.63,.84,progress)*(1-smooth(.84,.97,progress));
+  const fade=1-.56*smooth(.86,.98,progress);
+  // A dithered orbital limb, drawn on the same low-resolution grid as the stars.
+  const planetX=width*(.82+.12*worldTravel)-driftX*.44,planetY=height*(.78+.19*worldTravel)-driftY*.44;
+  const radius=Math.min(width*.22,height*.27);
+  const revealedRadius=Math.max(0,Math.round(radius));
+  for(let y=-revealedRadius;y<=revealedRadius;y++){
+    const edge=Math.sqrt(Math.max(0,radius*radius-y*y));
+    const left=Math.round(planetX-edge),right=Math.round(planetX+edge);
+    const row=Math.round(planetY+y);
+    skyInk.globalAlpha=fade*(1-.82*rush);
+    skyInk.fillStyle=y<0?'#0a222a':'#091a22';
+    skyInk.fillRect(left,row,right-left,1);
+    if(y<radius*.35){
+      skyInk.fillStyle=y<-radius*.70?'#397c84':'#214850';
+      skyInk.fillRect(left,row,Math.min(3,right-left),1);
+    }
+    skyInk.fillStyle='#244b53';
+    for(let x=left+4+(row%2)*2;x<right-2;x+=4){
+      if(((x-left)*3+y*5)%19<7 && y<radius*.60)skyInk.fillRect(x,row,1,1);
+    }
+  }
+  for(const star of sparks){
+    const layer=.38+star.depth*.85;
+    const expansion=1+rush*layer*.72;
+    const x=Math.round(width*.5+star.x*width*.56*expansion-driftX*layer+worldTravel*width*.055*layer);
+    const y=Math.round(height*.5+star.y*height*.56*expansion-driftY*layer-worldTravel*height*.085*layer);
+    if((x-planetX)**2+(y-planetY)**2<radius*radius && rush<.15)continue;
+    skyInk.fillStyle=starColors[star.tint];
+    skyInk.globalAlpha=fade*(.44+.56*star.depth);
+    if(rush>.05){
+      const trail=Math.round(rush*layer*7);
+      for(let i=1;i<=trail;i++){
+        skyInk.fillRect(x-Math.round(star.x*i),y-Math.round(star.y*i),1,1);
+      }
+    }
+    skyInk.fillRect(x,y,star.size,star.size);
+    if(star.size===2&&star.tint!==0){
+      skyInk.globalAlpha*=.5;
+      skyInk.fillRect(x-2,y,6,1);
+      skyInk.fillRect(x,y-2,1,6);
+    }
+  }
+  skyInk.globalAlpha=1;
+}
+// Five-column bitmap glyphs. Each row is a five-bit mask.
+const glyphs={
+  D:[30,19,17,17,17,19,30],
+  E:[31,24,24,30,24,24,31],
+  A:[14,27,17,31,17,17,17],
+  L:[24,24,24,24,24,24,31],
+  O:[14,27,17,17,17,27,14],
+  C:[15,24,16,16,16,24,15],
+  K:[17,19,22,28,22,19,17]
+};
+function drawWordmark(){
+  const ink=$('#pixel-title').getContext('2d');
+  if(!ink)return;
+  const pixels=[];
+  for(const [letterIndex,letter] of [...'DEADLOCK'].entries()){
+    for(const [y,mask] of glyphs[letter].entries()){
+      for(let x=0;x<5;x++)if(mask&(16>>x))pixels.push({x:letterIndex*6+x,y,letterIndex});
+    }
+  }
+  for(const [depth,color] of [[3,'#103a3a'],[2,'#206c6a'],[1,'#43aa90']]){
+    ink.fillStyle=color;
+    for(const pixel of pixels)ink.fillRect(pixel.x+depth-1,pixel.y+depth,1,1);
+  }
+  for(const {x,y,letterIndex} of pixels){
+    ink.fillStyle=letterIndex<4?(y<2?'#ffefba':y>4?'#cdab65':'#f2d58d'):(y<2?'#d9ffad':y>4?'#8bd47c':'#baf190');
+    ink.fillRect(x,y,1,1);
+  }
+}
+drawWordmark();
+try {
+  const gl = canvas.getContext('webgl',{alpha:true,antialias:false,premultipliedAlpha:false});
+  if (!gl) throw new Error('WebGL unavailable');
+  const vertex = 'attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}';
+  const fragment = `
+  precision highp float;
+  uniform vec2 res;
+  uniform float progress, angle;
+  const float PI=3.14159265;
+  mat2 rot(float a){float c=cos(a),s=sin(a);return mat2(c,-s,s,c);}
+  float box(vec3 p,vec3 b,float r){vec3 q=abs(p)-b+r;return length(max(q,0.))+min(max(q.x,max(q.y,q.z)),0.)-r;}
+  vec2 choose(vec2 a,vec2 b){return a.x<b.x?a:b;}
+  vec3 localLock(vec3 q){
+    q.xz=rot(angle)*q.xz;
+    q.xy=rot(.12*(1.-smoothstep(.3,.59,progress)))*q.xy;
+    q.yz=rot(.12*(1.-smoothstep(.45,.64,progress)))*q.yz;
+    q.y+=.26;
+    return q;
+  }
+  float cartridge(vec3 p,vec3 bounds){
+    float full=box(p,vec3(bounds.x,bounds.y-.15,bounds.z),.02);
+    float stepEdge=box(p,vec3(bounds.x-.12,bounds.y-.07,bounds.z),.02);
+    float cap=box(p,vec3(bounds.x-.24,bounds.y,bounds.z),.02);
+    return min(full,min(stepEdge,cap));
+  }
+  float keyway(vec2 p){
+    float head=max(abs(p.x)-.19,abs(p.y-.06)-.13);
+    float shoulder=max(abs(p.x)-.13,abs(p.y-.06)-.20);
+    float stem=max(abs(p.x)-.08,abs(p.y+.16)-.16);
+    return min(head,min(shoulder,stem));
+  }
+  vec2 lock(vec3 p){
+    vec3 q=localLock(p);
+    float opening=keyway(q.xy);
+    vec2 d=vec2(max(cartridge(q,vec3(1.12,.78,.36)),-opening),1.);
+    vec3 face=vec3(q.xy,abs(q.z)-.364);
+    float plate=cartridge(face,vec3(1.02,.685,.055));
+    d=choose(d,vec2(max(plate,-opening),2.));
+    float border=max(cartridge(face,vec3(1.075,.731,.045)),-plate+.019);
+    d=choose(d,vec2(max(border,-opening),3.));
+    float socket=box(face-vec3(0.,-.052,.056),vec3(.312,.393,.038),.028);
+    d=choose(d,vec2(max(socket,-opening),1.));
+    float socketLine=max(box(face-vec3(0.,-.052,.081),vec3(.319,.401,.014),.026),-socket+.016);
+    d=choose(d,vec2(max(socketLine,-opening),3.));
+    vec3 pixel=vec3(abs(q.x)-.77,q.y+.36,abs(q.z)-.425);
+    d=choose(d,vec2(box(pixel,vec3(.105,.026,.021),.007),3.));
+    vec3 pixelCap=vec3(abs(q.x)-.83,q.y-.43,abs(q.z)-.422);
+    d=choose(d,vec2(box(pixelCap,vec3(.037,.037,.022),.006),3.));
+    float engage=smoothstep(.29,.60,progress);
+    float catchPosition=mix(.92,.68,smoothstep(.55,.61,progress));
+    vec3 latch=vec3(q.x-catchPosition,q.y-.29,q.z-.428);
+    d=choose(d,vec2(box(latch,vec3(.16,.106,.075),.025),4.));
+    d=choose(d,vec2(length(q-vec3(.80,.29,.501))-.042,3.));
+    float snap=sin(clamp((progress-.60)*85.,0.,PI*2.))*exp(-max(progress-.60,0.)*37.)*.038;
+    q.y-=.55*(1.-engage)+snap;
+    q.x-=smoothstep(.24,.59,1.-engage)*.15;
+    vec3 bow=q-vec3(0.,1.035,0.);
+    float uprights=box(vec3(abs(bow.x)-.64,bow.y+.17,bow.z),vec3(.148,.52,.16),.025);
+    float elbows=box(vec3(abs(bow.x)-.49,bow.y-.32,bow.z),vec3(.15,.19,.16),.025);
+    float crown=box(bow-vec3(0.,.49,0.),vec3(.51,.135,.16),.025);
+    float shank=min(uprights,min(elbows,crown));
+    return choose(d,vec2(shank,5.));
+  }
+  vec3 normal(vec3 p){vec2 e=vec2(.002,0.);return normalize(vec3(lock(p+e.xyy).x-lock(p-e.xyy).x,lock(p+e.yxy).x-lock(p-e.yxy).x,lock(p+e.yyx).x-lock(p-e.yyx).x));}
+  float easeFlight(float x){
+    x=clamp(x,0.,1.);
+    return x*x*x*(x*(6.*x-15.)+10.);
+  }
+  void main(){
+    vec2 uv=(gl_FragCoord.xy*2.-res)/res.y;
+    float aim=easeFlight((progress-.53)/.15);
+    float push=easeFlight((progress-.64)/.24);
+    vec2 st=uv;
+    float impact=exp(-abs(progress-.607)*75.);
+    float ring=length(st);
+    const vec3 deadlockGreen=vec3(186.,241.,144.)/255.;
+    vec3 backdrop=deadlockGreen*exp(-abs(ring-(.5+max(progress-.60,0.)*8.))*95.)*impact;
+    float wideFrame=max(1.,1.16*res.y/res.x);
+    // The central ray follows the open bore at q.xy=(0,.06).
+    vec3 ro=vec3(0.,mix(.57,-.20,aim),mix(4.72*wideFrame,-.78,push));
+    vec3 ray=normalize(vec3(st,-mix(1.8,2.05,push)));
+    float depth=0.;vec2 hit;
+    for(int i=0;i<86;i++){hit=lock(ro+ray*depth);if(hit.x<.0018||depth>12.) break;depth+=hit.x;}
+    if(depth>12.||hit.x>=.0018){gl_FragColor=vec4(backdrop,min(length(backdrop),.8));return;}
+    vec3 p=ro+ray*depth,n=normal(p);
+    vec3 reflection=reflect(ray,n);
+    vec3 light=normalize(vec3(-.55,.78,.58));
+    float lit=max(dot(n,light),0.);
+    float panel=pow(max(0.,1.-abs(reflection.x+.35)*2.7),5.)*smoothstep(-.36,.6,reflection.y);
+    float rim=pow(1.-max(0.,dot(n,-ray)),2.5);
+    float emission=step(2.5,hit.y)*(1.-step(3.5,hit.y));
+    float catchGlow=step(3.5,hit.y)*(1.-step(4.5,hit.y));
+    vec3 base=vec3(.028,.030,.027);
+    if(hit.y>1.5 && hit.y<2.5)base=vec3(.055,.058,.052);
+    if(hit.y>4.5)base=vec3(.044,.047,.040);
+    float band=floor(lit*4.+.5)/4.;
+    vec3 color=base*(.66+band*1.45);
+    color+=vec3(.088,.13,.066)*pow(rim,1.3);
+    color+=vec3(.084,.095,.077)*panel;
+    color+=deadlockGreen*.24*pow(max(0.,dot(reflection,normalize(vec3(.8,-.1,.2)))),8.)*.42;
+    color=mix(color,deadlockGreen*(.68+band*.32),emission*.90);
+    color=mix(color,mix(deadlockGreen*.19,deadlockGreen,smoothstep(.54,.62,progress)),catchGlow*.85);
+    float checker=mod(floor(gl_FragCoord.x)+floor(gl_FragCoord.y),2.);
+    color+=.016*(checker-.5);
+    gl_FragColor=vec4(floor(color*24.+.5)/24.,1.);
+  }`;
+  const compile = (type, code) => {
+    const shader=gl.createShader(type);
+    gl.shaderSource(shader,code);
+    gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    return shader;
+  };
+  const program=gl.createProgram();
+  gl.attachShader(program,compile(gl.VERTEX_SHADER,vertex));
+  gl.attachShader(program,compile(gl.FRAGMENT_SHADER,fragment));
+  gl.linkProgram(program);
+  if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);
+  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+  const pos=gl.getAttribLocation(program,'p');
+  gl.enableVertexAttribArray(pos);
+  gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
+  const resolution=gl.getUniformLocation(program,'res');
+  const progress=gl.getUniformLocation(program,'progress');
+  const angleUniform=gl.getUniformLocation(program,'angle');
+  draw = (value,angle) => {
+    const width=canvas.clientWidth,height=canvas.clientHeight;
+    const scale=Math.min(devicePixelRatio,.68,660/width,470/height);
+    const w=Math.round(width*scale),h=Math.round(height*scale);
+    if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;gl.viewport(0,0,w,h);}
+    gl.uniform2f(resolution,w,h);
+    gl.uniform1f(progress,value);
+    gl.uniform1f(angleUniform,angle);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+  };
+  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();$('.fallback').style.display='block';});
+  canvas.addEventListener('webglcontextrestored',()=>location.reload());
+} catch(error) {
+  canvas.hidden=true;
+  $('.fallback').style.display='block';
+  console.warn(error);
+}
+const flight=$('.flight'),stage=$('.stage');
+// Each sprite is extruded into a solid and rendered with perspective.
+const stationSprites={
+ time:{
+  rows:[
+   '1111111111111','1222222222221','0220000000220','0022300032200',
+   '0002230322000','0000223220000','0000023200000','0000223220000',
+   '0002233322000','0022333332200','0220000000220','1222222222221','1111111111111'
+  ], colors:[[72,120,86],[140,194,121],[224,247,134]], depth:3
+ },
+ sports:{
+  rows:[
+   '0000000000110','0000000011120','0000001122220','0000012222220',
+   '0000122232210','0001222332220','0012223322210','0122233222100',
+   '1222332221000','1223322210000','1222221100000','1222110000000','0111000000000'
+  ], colors:[[97,52,32],[194,113,58],[252,222,157]], depth:5
+ },
+ threshold:{
+  rows:[
+   '1000000000000','1000000000333','1000000000033','1000000000332',
+   '1000000033302','1000333330002','1003300000002','1033000000202',
+   '1330000000202','1300000020202','1000202020202','1222222222222','1111111111111'
+  ], colors:[[57,104,128],[71,168,184],[163,247,225]], depth:3
+ },
+ goal:{
+  rows:[
+   '0001010101000','0001010101000','0011111111100','0012222222100',
+   '1112333332111','0012323232100','1112333332111','0012323232100',
+   '1112333332111','0012222222100','0011111111100','0001010101000','0001010101000'
+  ], colors:[[75,126,101],[121,195,126],[207,247,153]], depth:3
+ }
+};
+const voxelSides=[
+ {normal:[1,0,0],corners:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]],shade:.67},
+ {normal:[-1,0,0],corners:[[0,0,0],[0,0,1],[0,1,1],[0,1,0]],shade:.53},
+ {normal:[0,1,0],corners:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]],shade:1.13},
+ {normal:[0,-1,0],corners:[[0,0,0],[1,0,0],[1,0,1],[0,0,1]],shade:.43},
+ {normal:[0,0,1],corners:[[0,0,1],[1,0,1],[1,1,1],[0,1,1]],shade:1},
+ {normal:[0,0,-1],corners:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]],shade:.79},
+];
+function buildStationMesh(sprite){
+ const filled=new Map();
+ sprite.rows.forEach((row,j)=>[...row].forEach((cell,x)=>{
+  if(cell==='0')return;
+  const y=sprite.rows.length-j-1;
+  const depth=sprite.depth;
+  for(let z=0;z<depth;z++)filled.set([x,y,z].join(','),{x,y,z,ink:Number(cell)-1});
+ }));
+ const center=[sprite.rows[0].length/2,sprite.rows.length/2,sprite.depth/2];
+ const vertices=[],lookup=new Map();
+ function vertexIndex(x,y,z){
+  const position=[x,y,z];
+  const key=position.join(',');
+  if(!lookup.has(key)){
+   lookup.set(key,vertices.length);
+   vertices.push(position.map((value,axis)=>value-center[axis]));
+  }
+  return lookup.get(key);
+ }
+ const faces=[...filled.values()].flatMap(({x,y,z,ink})=>voxelSides.flatMap(side=>{
+  const n=side.normal;
+  if(filled.has([x+n[0],y+n[1],z+n[2]].join(',')))return [];
+  const color=sprite.colors[ink].map(channel=>Math.min(255,Math.round(channel*side.shade)));
+  return [{
+   n,color:`rgb(${color.join(',')})`,
+   vertices:side.corners.map(([cx,cy,cz])=>vertexIndex(x+cx,y+cy,z+cz))
+  }];
+ }));
+ return {vertices,faces};
+}
+function drawStation(model,angle,arrival,scroll){
+ const {canvas:surface,ink,mesh}=model;
+ if(!ink)return;
+ const {width,height}=surface;
+ const yaw=angle+scroll*3.7,pitch=.19+(1-arrival)*.20;
+ const cy=Math.cos(yaw),sy=Math.sin(yaw),cx=Math.cos(pitch),sx=Math.sin(pitch);
+ const rotate=([x,y,z])=>{
+  const lateral=x*cy+z*sy,depth=-x*sy+z*cy;
+  return [lateral,y*cx-depth*sx,y*sx+depth*cx];
+ };
+ const distance=31-4.6*arrival;
+ const focal=height*1.36;
+ const layers=[];
+ const vertices=mesh.vertices.map(rotate);
+ for(const face of mesh.faces){
+  const n=rotate(face.n);
+  const points=face.vertices.map(index=>vertices[index]);
+  const [x,y,z]=points[0];
+  if(-n[0]*x-n[1]*y+n[2]*(distance-z)<=0)continue;
+  layers.push({color:face.color,points,depth:points.reduce((sum,p)=>sum+p[2],0)});
+ }
+ layers.sort((a,b)=>a.depth-b.depth);
+ ink.clearRect(0,0,width,height);
+ for(const layer of layers){
+  ink.fillStyle=layer.color;
+  ink.strokeStyle=layer.color;
+  ink.lineWidth=.68;
+  ink.beginPath();
+  for(const [index,[x,y,z]] of layer.points.entries()){
+   const scale=focal/(distance-z);
+   const sx=width*.50+x*scale,sy=height*.48-y*scale;
+   if(index===0)ink.moveTo(sx,sy);else ink.lineTo(sx,sy);
+  }
+  ink.closePath();
+  ink.fill();
+  ink.stroke();
+ }
+}
+const stationModels=[...document.querySelectorAll('.station-model')].map(canvas=>({
+ canvas,ink:canvas.getContext('2d'),mesh:buildStationMesh(stationSprites[canvas.dataset.model]),
+ screen:canvas.closest('.station-screen'),section:canvas.closest('.station'),angle:-.48,
+}));
+const stationLinks=[...document.querySelectorAll('.station-nav a[href$="-lock"]')];
+let selectedStation='';
+function renderStations(elapsed,scrollLag){
+ let running=false,nearest=null,nearestDistance=Infinity;
+ const viewport=window.innerHeight;
+ for(const model of stationModels){
+  const scene=model.screen.getBoundingClientRect();
+  if(scene.bottom<=0||scene.top>=viewport)continue;
+  const section=model.section.getBoundingClientRect();
+  const offset=scene.top+scene.height*.5-viewport*.5;
+  const distance=Math.abs(offset);
+  if(distance<nearestDistance){nearest=model;nearestDistance=distance;}
+  const arrival=reduced.matches?1:1-smooth(viewport*.10,viewport*.72,distance);
+  const range=Math.max(1,section.height-scene.height);
+  const progress=reduced.matches?0:smooth(0,range,scene.top-section.top+scrollLag);
+  model.screen.style.setProperty('--arrival',arrival);
+  if(!reduced.matches&&!paused){
+   model.angle=(model.angle+elapsed*.00066)%(2*Math.PI);
+   running=true;
+  }
+  drawStation(model,reduced.matches?-.36:model.angle,arrival,progress);
+ }
+ const id=nearest?.section.id||'';
+ if(id!==selectedStation){
+  selectedStation=id;
+  for(const link of stationLinks){
+   if(link.hash==='#'+id)link.setAttribute('aria-current','location');
+   else link.removeAttribute('aria-current');
+  }
+ }
+ return running;
+}
+
+let frame=0, easedScroll=null, previousPhase='';
+function renderFlight(now){
+  frame=0;
+  const available=flight.offsetHeight-stage.offsetHeight;
+  const rawScroll=window.scrollY;
+  const elapsed=lastFrame===null?0:Math.min(now-lastFrame,48);
+  const delta=easedScroll===null?0:rawScroll-easedScroll;
+  if(reduced.matches||easedScroll===null||Math.abs(delta)<.45||Math.abs(delta)>stage.offsetHeight*1.8){
+    easedScroll=rawScroll;
+  }else{
+    easedScroll+=delta*(1-Math.exp(-elapsed/58));
+  }
+  const scrollLag=easedScroll-rawScroll;
+  const p=reduced.matches?0:Math.min(1,Math.max(0,(-flight.getBoundingClientRect().top+scrollLag)/Math.max(1,available*.82)));
+  const visible=stage.getBoundingClientRect().bottom>0 && !document.hidden;
+  if(visible && !paused && p<alignStart && lastFrame!==null){
+    orbit=(orbit+Math.min(now-lastFrame,48)*.00043)%fullTurn;
+  }
+  lastFrame=now;
+  const turn=lockAngle(p);
+  if(!document.hidden){
+    const worldTravel=reduced.matches?0:smooth(0,3.9*stage.offsetHeight,easedScroll-flight.offsetHeight+stage.offsetHeight);
+    renderSky(reduced.matches?0:p,worldTravel);
+    if(visible)draw(reduced.matches?.61:p,turn);
+  }
+  const fallback=$('.fallback');
+  fallback.style.setProperty('--turn',`${turn}rad`);
+  const sceneProgress=reduced.matches?.61:p;
+  const push=smooth(.64,.87,sceneProgress);
+  fallback.style.setProperty('--seat',`${-27*(1-smooth(.31,.60,sceneProgress))}%`);
+  fallback.style.setProperty('--approach',1);
+  fallback.style.transform=reduced.matches
+    ?'translate(-50%,calc(-50% - 15svh)) scale(.72)'
+    :`translate(-50%,calc(-50% - ${smooth(.57,.72,sceneProgress)*11}svh)) scale(${1+14*push})`;
+  fallback.style.opacity=1-smooth(.75,.865,sceneProgress);
+  const reveal=reduced.matches?1:smooth(.86,.98,p);
+  stage.style.setProperty('--title-opacity',reveal);
+  $('.start-game').inert=reveal<.68;
+  stage.style.setProperty('--title-rise',`${15*(1-reveal)}px`);
+  stage.style.setProperty('--title-scale',.91+.09*reveal);
+  stage.style.setProperty('--title-scan',reduced.matches?1:smooth(.86,.95,p));
+  const state=reduced.matches?'Vaults below':p<.60?'Scroll to seal':p<.86?'Through the keyhole':'Choose a lock below';
+  if(state!==previousPhase){$('#flight-state').textContent=state;previousPhase=state;}
+  const stationsMoving=!document.hidden && renderStations(elapsed,scrollLag);
+  if(!document.hidden && (stationsMoving || Math.abs(scrollLag)>.45 || (visible && !paused && !reduced.matches && p<alignStart)))queueFlight();
+}
+function queueFlight(){if(!frame)frame=requestAnimationFrame(renderFlight);}
+addEventListener('scroll',queueFlight,{passive:true});
+addEventListener('resize',queueFlight);
+addEventListener('pointermove',event=>{
+  if(reduced.matches)return;
+  pointer.x=event.clientX/Math.max(1,sky.clientWidth)*2-1;
+  pointer.y=event.clientY/Math.max(1,sky.clientHeight)*2-1;
+  queueFlight();
+});
+document.documentElement.addEventListener('pointerleave',()=>{
+  pointer.x=0;
+  pointer.y=0;
+  queueFlight();
+});
+function updateMotion(){
+  motion.hidden=stationMotion.hidden=reduced.matches;
+  const label=paused?'Resume idle spin':'Pause idle spin';
+  motion.textContent=label;
+  stationMotion.textContent=paused?'▶':'Ⅱ';
+  stationMotion.title=label;
+  stationMotion.setAttribute('aria-label',label);
+  lastFrame=null;
+  queueFlight();
+}
+motion.onclick=stationMotion.onclick=()=>{paused=!paused;updateMotion();};
+reduced.addEventListener('change',()=>{
+  paused=reduced.matches;
+  pointer.x=0;
+  pointer.y=0;
+  updateMotion();
+});
+document.addEventListener('visibilitychange',()=>{lastFrame=null;easedScroll=null;queueFlight();});
+updateMotion();
+queueFlight();
+</script>
+<script>
+const vaults=[
+  {id:'DL-7E91',name:'Winter archive',state:'Locked',condition:'Opens on Jan 1, 2027 at 9:00 AM',target:'2027-01-01T14:00:00Z',clock:'35d 08h 42m',failsafe:'2027-11-26T14:00:00Z',size:'2.48 GiB',round:'26,719,201'},
+  {id:'DL-03BC',name:'Project archive',state:'Ready to open',condition:'Time condition verified',target:'2026-11-25T14:00:00Z',clock:'Round verified',failsafe:'2027-11-23T14:00:00Z',size:'874 MiB',round:'25,653,601'},
+  {id:'DL-5F04',name:'Research folder',state:'Opened',condition:'Time condition fulfilled',target:'2026-11-20T14:00:00Z',clock:'Files restored',failsafe:'2027-11-17T14:00:00Z',size:'129 MiB',round:'25,509,601'}
+];
+const dateFormatter=new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'});
+function formatDate(value){
+  const date=new Date(value);
+  return Number.isNaN(date.valueOf())?'Date pending':dateFormatter.format(date);
+}
+vaults[0].condition='Opens on '+formatDate(vaults[0].target);
+const html=value=>String(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const size=bytes=>bytes>=1048576?(bytes/1048576).toFixed(2)+' MiB':bytes>=1024?(bytes/1024).toFixed(1)+' KiB':bytes+' B';
+let filter='All';
+const icon=state=>{
+  const shackle=state==='Locked'?'M3 6V3H4V2H8V3H9V6H7V4H5V6Z':'M3 6V3H4V2H8V3H9V4H7V4H5V6Z';
+  return `<svg aria-hidden="true" width="26" height="28" viewBox="0 0 12 13" fill="currentColor" shape-rendering="crispEdges"><path d="${shackle}"/><path fill-rule="evenodd" d="M2 6H10V7H11V11H10V12H2V11H1V7H2ZM5 8H7V10H5Z"/></svg>`;
+};
+function renderVaults(){
+  $('#filters').innerHTML=['All','Locked','Ready to open','Opened'].map(f=>`<button aria-pressed="${f===filter}">${f}</button>`).join('');
+  $('#filters').querySelectorAll('button').forEach(button=>button.onclick=()=>{filter=button.textContent;renderVaults();[...$('#filters').children].find(item=>item.textContent===filter).focus();});
+  const list=vaults.filter(v=>filter==='All'||filter===v.state);
+  $('#cards').innerHTML=list.map(v=>`<button class="card" data-id="${v.id}"><div class="card-top ${v.state==='Ready to open'?'ready':''}">${icon(v.state)}<span class="badge">${v.state}</span></div><h3>${html(v.name)}</h3><p>${html(v.condition)}</p><div class="readout">${v.clock}</div><footer class="small">Fail-safe · ${formatDate(v.failsafe)}<br>${v.id} · ${v.size}</footer></button>`).join('')||'<div class="empty">No vaults match this filter.</div>';
+  $('#cards').querySelectorAll('button').forEach(button=>button.onclick=()=>details(vaults.find(v=>v.id===button.dataset.id)));
+}
+const dialog=$('#panel'), body=$('#panel-body');
+function openPanel(title){
+  $('#dialog-title').textContent=title;
+  if(!dialog.open)dialog.showModal();
+}
+function details(v,tab='Overview'){
+  openPanel(v.name);
+  const audit=v.audit||[{time:v.state==='Locked'?'2026-11-26T05:00:00Z':v.target,event:v.state==='Opened'?'Released':'Check',result:v.state==='Opened'?'Restored to a new folder':v.state==='Locked'?'Target round pending':'Round signature verified'}];
+  const overview=`<p><span class="badge">${v.state}</span></p><p>${html(v.condition)}</p><div class="readout">${v.clock}</div><p>Fail-safe · ${formatDate(v.failsafe)}</p>${v.state==='Opened'?'':`<button class="btn primary" id="restore" ${v.state==='Locked'?'disabled':''}>Restore files</button>`}`;
+  body.innerHTML=`<div class="tabs" aria-label="Vault detail sections">${['Overview','Audit log','Technical'].map(t=>`<button aria-pressed="${t===tab}">${t}</button>`).join('')}</div>`+
+  (tab==='Overview'?overview:tab==='Technical'?`<p>Vault ID · ${v.id}<br>Chain · drand quicknet<br>Target round · ${v.round}<br>Target UTC · ${new Date(v.target).toISOString()}<br>Size · ${v.size}</p>`:
+  `<ul class="rows">${audit.map(e=>`<li><span class="small">${formatDate(e.time)}</span><br>${e.event} · ${e.result}</li>`).join('')}</ul>`);
+  body.querySelectorAll('.tabs button').forEach(button=>button.onclick=()=>{details(v,button.textContent);[...body.querySelectorAll('.tabs button')].find(item=>item.textContent===button.textContent).focus();});
+  if($('#restore')&&!$('#restore').disabled)$('#restore').onclick=()=>{
+    body.insertAdjacentHTML('beforeend','<p>Simulate restoring to a new folder?</p><button class="btn" id="simulate-restore">Simulate restore</button>');
+    $('#restore').disabled=true;
+    $('#simulate-restore').onclick=()=>{v.state='Opened';v.clock='Files restored';v.audit=[{time:new Date().toISOString(),event:'Released',result:'Demo restore completed'},...audit];renderVaults();details(v,'Audit log');};
+    $('#simulate-restore').focus();
+  };
+}
+const checks=['Photos / iCloud Photos','Google Photos','Time Machine','Downloads','Chat apps'];
+const localInput=date=>new Date(date.valueOf()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
+const freshDraft=()=>({files:[],step:0,target:localInput(new Date(Date.now()+86400000)),failsafe:localInput(new Date(Date.now()+365*86400000)),label:'',confirmation:'',checks:[]});
+let draft;
+function wizard(){
+  openPanel('New lock');
+  const step=draft.step;
+  const total=draft.files.reduce((sum,item)=>sum+item.size,0);
+  const steps=['Choose what to lock','Choose the condition','Set a fail-safe','Review and seal'];
+  const fileList=draft.files.map(file=>`<li>${html(file.webkitRelativePath||file.name)}</li>`).join('');
+  const content=[
+    `<div class="drop" id="drop">Drop files here or use a picker.<label>Files <input type="file" multiple id="files"></label><label>Folder <input type="file" webkitdirectory multiple id="folder"></label></div><p>${draft.files.length} files · ${size(total)}</p><label>Vault name <input id="label" value="${html(draft.label)}" maxlength="60" placeholder="My vault"></label>`,
+    `<div class="choices"><button class="btn" aria-pressed="true">Time-lock</button><button class="btn" disabled>Sports result · upcoming</button><button class="btn" disabled>Number threshold · coming soon</button><button class="btn" disabled>AI-judged goal · coming soon</button></div><label>Opens at <input type="datetime-local" id="target" value="${draft.target}"></label><div class="choices" id="quick">${[[1,'1 hour'],[24,'1 day'],[168,'1 week'],[720,'1 month']].map(([h,label])=>`<button class="btn" data-hours="${h}">${label}</button>`).join('')}</div>`,
+    `<p>The fail-safe opens the vault if the condition has not been met. Choose a date at least 30 days from today.</p><label>Fail-safe date <input type="datetime-local" id="failsafe" value="${draft.failsafe}"></label>`,
+    `<p>Condition · ${formatDate(draft.target)}<br>Fail-safe · ${formatDate(draft.failsafe)}</p><p>Originals the desktop app would delete</p><ol class="rows">${fileList}</ol><label>Type <strong>LOCK</strong> to confirm <input id="confirm" autocomplete="off" value="${html(draft.confirmation)}"></label><fieldset><legend>Check for other copies</legend>${checks.map((c,i)=>`<label><input type="checkbox" value="${i}" ${draft.checks.includes(i)?'checked':''}> ${c}</label>`).join('')}</fieldset><p class="small">Simulating the seal leaves every original intact.</p>`
+  ];
+  body.innerHTML=`<p class="eyebrow">Step ${step+1} of 4</p><h4>${steps[step]}</h4>${content[step]}<p id="form-error" class="error" role="alert"></p><div class="choices">${step?`<button class="btn" id="back">Back</button>`:''}<button class="btn primary" id="next">${step===3?'Simulate seal':'Continue'}</button></div>`;
+  const setFiles=files=>{draft.files=Array.from(files);wizard();$('#next').focus();};
+  if(step===0){
+    $('#label').oninput=event=>draft.label=event.target.value;
+    for(const id of ['#files','#folder'])$(id).onchange=event=>{if(event.target.files.length)setFiles(event.target.files);};
+    $('#drop').ondragover=event=>event.preventDefault();
+    $('#drop').ondrop=event=>{event.preventDefault();const items=Array.from(event.dataTransfer.items);if(items.some(item=>item.webkitGetAsEntry?.()?.isDirectory)){$('#form-error').textContent='Use the folder picker for folders.';return;}if(event.dataTransfer.files.length)setFiles(event.dataTransfer.files);};
+  }
+  if(step===1){
+    $('#target').oninput=event=>draft.target=event.target.value;
+    $('#quick').onclick=event=>{const hours=Number(event.target.dataset.hours);if(hours)$('#target').value=draft.target=localInput(new Date(Date.now()+hours*3600000));};
+  }
+  if(step===2)$('#failsafe').oninput=event=>draft.failsafe=event.target.value;
+  if(step===3){
+    $('#confirm').oninput=event=>draft.confirmation=event.target.value;
+    body.querySelector('fieldset').onchange=()=>draft.checks=[...body.querySelectorAll(':checked')].map(box=>Number(box.value));
+  }
+  if($('#back'))$('#back').onclick=()=>{draft.step--;wizard();};
+  $('#next').onclick=()=>{
+    let error='';
+    if(step===0&&!draft.files.length)error='Choose at least one file.';
+    if(step===1&&!(new Date(draft.target)>Date.now()))error='Choose a future opening time.';
+    if(step===2&&!(new Date(draft.failsafe)>=Date.now()+30*86400000))error='Choose a fail-safe at least 30 days from now.';
+    if(step===2&&new Date(draft.failsafe)<new Date(draft.target))error='Choose a fail-safe on or after the opening time.';
+    if(step===3&&(draft.confirmation!=='LOCK'||draft.checks.length!==checks.length))error='Type LOCK and check each item before continuing.';
+    if(error){$('#form-error').textContent=error;return;}
+    if(step<3){draft.step++;wizard();$('#next').focus();return;}
+    const created=new Date().toISOString();
+    vaults.unshift({id:'DL-'+crypto.getRandomValues(new Uint32Array(1))[0].toString(16).toUpperCase().padStart(8,'0'),name:draft.label.trim()||'Untitled vault',state:'Locked',condition:'Opens on '+formatDate(draft.target),target:draft.target,clock:'Awaiting target round',failsafe:draft.failsafe,size:size(total),round:'Unassigned in preview',audit:[{time:created,event:'Created',result:'Demo vault sealed'}]});
+    draft=null;filter='All';renderVaults();
+    $('#dialog-title').textContent='Demo vault sealed';
+    body.innerHTML='<p>Conditions can’t be changed, only made stricter.</p><button class="btn primary" id="view">View vault</button>';
+    $('#view').onclick=()=>details(vaults[0]);
+    $('#view').focus();
+  };
+}
+dialog.addEventListener('close',()=>{draft=null;body.replaceChildren();});
+function openNewLock(){draft=freshDraft();wizard();}
+$('#new').onclick=openNewLock;
+$('#choose-time').onclick=openNewLock;
+$('#theme').onclick=()=>{const light=document.documentElement.classList.toggle('light');$('#theme').textContent=light?'Dark mode':'Light mode';};
+renderVaults();
+</script>
+</html>
