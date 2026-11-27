@@ -26,6 +26,9 @@ export {
   readManifest,
   readVaultHeader,
   verifyVault,
+  vaultKey,
+  VAULT_FORMAT_VERSION,
+  WrongKeyError,
   type CreateVaultOptions,
   type OpenVaultOptions,
   type VaultHeader,
@@ -50,3 +53,14 @@ export {
   type WrapOptions,
   type WrapTarget,
 } from "./tlock.js";
+export {
+  SIG_HEADERS,
+  canonicalRequest,
+  generateDeviceKeyPair,
+  publicKeyFromRaw,
+  signRequest,
+  verifySignature,
+  type CanonicalRequest,
+  type DeviceKeyPair,
+  type SignOptions,
+} from "./signing.js";

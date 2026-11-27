@@ -49,13 +49,18 @@ by the owner alone.
    TLS connections out of the enclave over vsock, and AWS credentials and API keys are delivered
    over the verifier channel. Optional 2-of-3 Shamir split across the KMS key, a second provider
    and a guardian's age key. Tested with mocks; the live sports test is manual. ✅
-6. End to end against the deployed escrow, including cheat attempts.
+6. **End to end.** The whole stack runs locally as deployed: API and enclave-verifier processes,
+   Postgres over the wire, KMS over its real protocol with PCR0 policies, drand over HTTP, and
+   mock sports providers over TLS. The `condlock` CLI drives it (`device register`,
+   `lock --escrow` / `--nfl` / `--guardian`, escrow-aware `unlock`/`status`/`log`). Cheat
+   attempts are tests, and each must stay locked. Vault format v2 adds key commitment.
+   [DEPLOY.md](DEPLOY.md) has the real AWS steps and costs. ✅
 
-## Core vault format (v1)
+## Core vault format (v2; v1 still readable)
 
 ```
 <vault>/
-  vault.json          public header: format, version, vaultId, chunkSize (no names, no sizes)
+  vault.json          public header: format, version, vaultId, chunkSize, kdf, keyCommitment (no names, no sizes)
   manifest.enc        encrypted JSON: entries [{ fileId, name, kind: file|dir, size, sha256 }]
   data/<fileId>.bin   encrypted stream per entry (a folder is one tar stream)
 ```
@@ -67,6 +72,21 @@ header  = "CLK1" | version u8 | fileId 16B | chunkSize u32be          (25 bytes)
 record  = nonce 12B (random) | AES-256-GCM(chunk) | tag 16B
 AAD     = "condlock/v1/chunk" | header | vaultId 16B | index u64be | final u8
 ```
+
+**Key commitment (v2, milestone 6).** AES-GCM isn't key-committing. A crafted ciphertext can
+authenticate under two keys and decrypt to two different plaintexts: the "invisible
+salamanders" attack, and `test/commitment.test.ts` builds one. v2 follows the AWS
+Encryption SDK's committing suites and never uses the DEK directly. HKDF-SHA256 (salt = vault
+ID) derives two values from it:
+- the AES-256-GCM key for the manifest and the streams (info `condlock/v2/aes-256-gcm-key`);
+- a 32-byte commitment, stored in `vault.json` as `keyCommitment`, whose info covers the header
+  (`condlock/v2/key-commitment` plus format, version, vault ID, chunk size and kdf).
+
+Opening compares the commitment in constant time before reading anything else. A wrong key,
+or any edit to `vault.json`, fails with `WrongKeyError`. That includes a downgrade to v1:
+the streams were sealed under the derived key, so they fail too. v1 vaults, which use the DEK
+directly with no commitment, still open. The stream format below is unchanged (stream header
+version 1).
 
 The `final` flag is authenticated, so dropping trailing chunks is detected; every
 stream ends with exactly one final record (an empty file is one empty final record).
@@ -306,3 +326,62 @@ attestation.
 - **Real-API checks:** the API-Sports parser follows the documented format and has only been
   checked against mocks. TheSportsDB's matches its live API. The live test checks both with
   your keys.
+
+## End to end and cheat attempts (milestone 6)
+
+**CLI with the escrow.**
+- `condlock device register --escrow <url>` creates an Ed25519 device key in
+  `$CONDLOCK_HOME/device.json` (mode 600) and registers it with the admin token. Request
+  signing is shared code in `@condlock/core`.
+- `lock --escrow` (time) and `lock --nfl <file>` (optionally `--guardian age1…`) work as before
+  up to `verifyVault`, then `POST /locks` with the DEK. The originals are deleted only after the
+  escrow answers 201.
+- `lock.json` v2 records the escrow, the key scheme, the condition hash and a copy of
+  `vault.json`.
+- `unlock` tries the local tlock keys first. If they're still locked, it compares `vault.json`
+  with that copy, so a damaged header doesn't spend the one release, and then asks the escrow.
+  Exit 5 means the escrow is unavailable or short of shares.
+
+**The local stack** (`e2e/src/stack.ts`), as in DEPLOY.md:
+
+| Deployed piece | Stand-in |
+|---|---|
+| EC2 parent: escrow API | `src/server.ts` as its own process, `NODE_ENV=test` |
+| Nitro Enclave: verifier | `src/verifier/main.ts` as its own process. `nsm-attest` is a mock helper signing for a chosen PCR0 |
+| `vsock-proxy` per host | byte forwarders |
+| AWS KMS | a mock speaking AWS JSON 1.1 (Encrypt/Decrypt, Recipient → CiphertextForRecipient), PCR0 key policies |
+| Neon Postgres | PGlite behind a Postgres wire-protocol socket, through node-postgres |
+| drand quicknet | a private chain served over drand's HTTP API (tests publish rounds) |
+| API-Sports, TheSportsDB | mock HTTPS servers (throwaway CA) |
+
+The test-only hooks are refused when `NODE_ENV=production`, and a test checks this. They are
+`DRAND_CHAIN_FILE`, `EGRESS_EXTRA_CA_FILE` and `DEV_NO_ATTESTATION`.
+
+**Cheat attempts** (`e2e/test/cheats.test.ts`). Each must leave nothing restored and the escrow
+lock unreleased:
+
+| Attempt | What stops it |
+|---|---|
+| Device clock days ahead or behind | tlock ignores the clock; the escrow rejects the stale signature (logged) |
+| Edit or delete the local log | the hash chain reports it; nothing depends on the log |
+| Edit, delete or truncate the server log | append-only triggers. The service role can't drop or disable them. Even the DB owner wiping rows unlocks nothing |
+| Replay, forge, re-path or body-swap a signed request; stale timestamp; unknown device | single-use nonces, Ed25519 over method, path, time, nonce and body hash; all logged |
+| Edit `lock.json` or a tlock key's round | the round is inside the tlock ciphertext |
+| DB owner rewrites the sealed condition, or moves a wrapped key to another vault | the seal and the vault ID are in the KMS encryption context: `unwrap-failed` |
+| Non-approved enclave image with the parent's credentials | the KMS key policy needs the approved PCR0: `access-denied` |
+| API host calls KMS Decrypt directly | no attestation: `AccessDeniedException` |
+| One source lies about the score; sources disagree on final vs postponed; a wrong game link; one still in Q4 | two-source agreement: stays locked, `sourcesDisagree` logged with both reports |
+| A source or KMS down; a source unreachable at the network level | `sources-unavailable` or `key-service`, 503: try later, never a release |
+| Only one 2-of-3 share (either provider, or the guardian), or the guardian's share before the time | Shamir needs two shares, and the condition is checked first |
+| Tampered `vault.json` | the CLI won't ask the escrow, and the key commitment refuses it. Editing both copies spends the release but restores nothing |
+
+**Known limits** (unchanged from earlier milestones unless noted):
+- **The escrow sees the DEK when a lock is created.**
+- **Editing the header in both places:** if you edit `vault.json` and its copy in `lock.json`,
+  the one escrow release is spent. Restore `vault.json` and the tlock keys still open the vault
+  (new in milestone 6).
+- **The database owner** can disable the triggers and rewrite history. That can't unlock
+  anything, but the server log is only as trustworthy as the owner. The service role can't do
+  it.
+- **The CLI holds the DEK as a base64 string** in the `POST /locks` body for a moment. JS
+  strings can't be zeroed.

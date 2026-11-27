@@ -40,7 +40,7 @@ export async function testCa(name = "Condition Lock Test CA"): Promise<TestCa> {
   return { certPem: cert.toString("pem"), keys, cert };
 }
 
-export async function serverCert(ca: TestCa, hostnames: string[]): Promise<{ certPem: string; keyPem: string }> {
+export async function serverCert(ca: TestCa, hostnames: string[], ips: string[] = []): Promise<{ certPem: string; keyPem: string }> {
   const keys = (await webcrypto.subtle.generateKey(alg, true, ["sign", "verify"])) as CryptoKeyPair;
   const cert = await x509.X509CertificateGenerator.create({
     serialNumber: serial(),
@@ -54,11 +54,20 @@ export async function serverCert(ca: TestCa, hostnames: string[]): Promise<{ cer
     extensions: [
       new x509.BasicConstraintsExtension(false, undefined, true),
       new x509.ExtendedKeyUsageExtension([x509.ExtendedKeyUsage.serverAuth]),
-      new x509.SubjectAlternativeNameExtension(hostnames.map((h) => ({ type: "dns" as const, value: h }))),
+      new x509.SubjectAlternativeNameExtension([
+        ...hostnames.map((h) => ({ type: "dns" as const, value: h })),
+        ...ips.map((ip) => ({ type: "ip" as const, value: ip })),
+      ]),
     ],
   });
   const keyPem = pem("PRIVATE KEY", await webcrypto.subtle.exportKey("pkcs8", keys.privateKey));
   return { certPem: cert.toString("pem"), keyPem };
+}
+
+export interface HttpReply {
+  status?: number;
+  json: unknown;
+  headers?: Record<string, string>;
 }
 
 export interface TestHttpsServer {
@@ -68,15 +77,27 @@ export interface TestHttpsServer {
 
 export async function startHttps(
   tlsCert: { certPem: string; keyPem: string },
-  handler: (req: import("node:http").IncomingMessage, body: string) => { status?: number; json: unknown; headers?: Record<string, string> },
+  handler: (
+    req: import("node:http").IncomingMessage,
+    body: string,
+  ) => HttpReply | Promise<HttpReply>,
 ): Promise<TestHttpsServer> {
   const server = https.createServer({ cert: tlsCert.certPem, key: tlsCert.keyPem }, (req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (d: Buffer) => chunks.push(d));
     req.on("end", () => {
-      const out = handler(req, Buffer.concat(chunks).toString("utf8"));
-      res.writeHead(out.status ?? 200, { "content-type": "application/json", ...(out.headers ?? {}) });
-      res.end(JSON.stringify(out.json));
+      Promise.resolve()
+        .then(() => handler(req, Buffer.concat(chunks).toString("utf8")))
+        .then(
+          (out) => {
+            res.writeHead(out.status ?? 200, { "content-type": "application/json", ...(out.headers ?? {}) });
+            res.end(JSON.stringify(out.json));
+          },
+          (err: Error) => {
+            res.writeHead(500, { "content-type": "application/json" });
+            res.end(JSON.stringify({ message: err.message }));
+          },
+        );
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));

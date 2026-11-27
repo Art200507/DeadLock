@@ -177,7 +177,7 @@ describe("condlock lock: safety and validation", () => {
       [["--until", "2001-01-01T00:00Z"], /not in the future/],
       [["--until", "2030-01-01T09:00"], /no time zone/],
       [["--until", "soon"], /can't read "soon"/],
-      [[], /needs --until/],
+      [[], /needs exactly one of --until/],
     ];
     for (const [flags, re] of cases) {
       const c = ctx();

@@ -1,0 +1,27 @@
+{
+  "name": "@condlock/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --conditions=development --test --test-concurrency=1 test/*.test.ts",
+    "test:offline": "tsx --conditions=development --test --test-concurrency=1 test/*.test.ts"
+  },
+  "dependencies": {
+    "@condlock/cli": "workspace:*",
+    "@condlock/core": "workspace:*",
+    "@condlock/escrow": "workspace:*",
+    "@electric-sql/pglite": "0.6.0",
+    "@electric-sql/pglite-socket": "0.3.0",
+    "@smithy/node-http-handler": "4.14.2",
+    "age-encryption": "0.3.1",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.0"
+  }
+}

@@ -1,23 +1,30 @@
 /**
- * condlock — lock files behind a time, locally, using drand timelock encryption.
+ * condlock — lock files behind a time or an NFL result.
  *
- *   condlock lock <path...> --until <time|duration> [--failsafe <time|duration>] [--vault <dir>] [--yes]
- *   condlock unlock <vault> [--out <dir>]
+ *   condlock device register --escrow <url> [--label <name>]      (admin token in CONDLOCK_ADMIN_TOKEN)
+ *   condlock lock <path...> --until <time|duration> [--escrow] [--failsafe ...] [--vault <dir>] [--yes]
+ *   condlock lock <path...> --nfl <condition.json> [--guardian <age1...>] [--failsafe ...] [--yes]
+ *   condlock unlock <vault> [--out <dir>] [--guardian-share <file>]
  *   condlock status <vault> [--offline]
- *   condlock log <vault>
+ *   condlock log <vault> [--server]
  *
- * The data key lives only in memory: it is generated, used to encrypt and to make the two
- * tlock envelopes, then zeroed. Unlocking is decided by drand alone, never the laptop clock.
+ * The data key lives only in memory: it is generated, used to encrypt, to make the tlock
+ * envelopes and (with an escrow) sent once over TLS to be sealed, then zeroed. Unlocking is
+ * decided by drand rounds and the escrow's verifier, never by this computer's clock.
  */
+import { readFileSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs, type ParseArgsConfig } from "node:util";
+import { generateKeyPairSync } from "node:crypto";
 import {
   DrandUnavailableError,
   QUICKNET,
+  QUICKNET_RELAYS,
   StillLockedError,
+  chainFromInfo,
   createDrandClient,
   createVault,
   generateDek,
@@ -33,13 +40,16 @@ import {
   zeroize,
   type DrandChain,
   type TlockEnvelope,
+  type VaultHeader,
 } from "@condlock/core";
+import { checkEscrowUrl, loadDevice, saveDevice } from "./device.js";
+import { EscrowClient, EscrowUnreachableError, registerDevice } from "./escrow-client.js";
 import type { ChainClient } from "drand-client";
 import { fetchBeacon } from "drand-client";
 import { LOG_FILE, appendLog, readLog } from "./log.js";
 import { DAY_MS, formatBytes, formatSpan, parseWhen } from "./time.js";
 
-export const EXIT = { OK: 0, ERROR: 1, STILL_LOCKED: 2, DRAND_UNAVAILABLE: 3, CANCELLED: 4 } as const;
+export const EXIT = { OK: 0, ERROR: 1, STILL_LOCKED: 2, DRAND_UNAVAILABLE: 3, CANCELLED: 4, ESCROW_UNAVAILABLE: 5 } as const;
 
 export const DEFAULT_FAILSAFE_MS = 365 * DAY_MS;
 export const MIN_FAILSAFE_MS = 30 * DAY_MS;
@@ -48,6 +58,7 @@ export const CONFIRM_WORD = "delete";
 const LOCK_FILE = "lock.json";
 const KEYS_DIR = "keys";
 const KEY_FILES = { timelock: "timelock.json", failsafe: "failsafe.json" } as const;
+const GUARDIAN_SHARE_FILE = "guardian-share.age";
 
 export interface CliContext {
   cwd: string;
@@ -60,20 +71,39 @@ export interface CliContext {
   chain: DrandChain;
   /** Key generator; injectable so tests can check the key is zeroed and never hits disk. */
   generateDek: () => Uint8Array;
+  /** Where this computer's escrow device key lives ($CONDLOCK_HOME, default ~/.condlock). */
+  home: string;
+  fetch: typeof fetch;
+  /** This computer's clock: only for signing request timestamps. Never decides a lock. */
+  now: () => Date;
+  env: Record<string, string | undefined>;
 }
 
 export interface LockFile {
   format: "condlock-lock";
-  version: 1;
+  /** 1: local tlock only (milestone 3). 2: adds the vault header copy and the escrow record. */
+  version: 1 | 2;
   vaultId: string;
   /** Laptop clock at lock time; informational only. */
   createdAt: string;
-  condition: { type: "time"; round: number; unlockAt: string };
+  condition: { type: "time"; round: number; unlockAt: string } | { type: "nfl"; rule: Record<string, unknown> };
   failsafe: { round: number; unlockAt: string };
-  keys: { timelock: string; failsafe: string };
+  keys: { timelock?: string; failsafe: string; guardianShare?: string };
+  /** A copy of vault.json, compared before asking the escrow so a damaged header can't waste the one release. */
+  vaultHeader?: VaultHeader;
+  escrow?: { url: string; deviceId: string; keyScheme: string; conditionSha256: string };
 }
 
-export function defaultContext(): CliContext {
+export function defaultContext(env: Record<string, string | undefined> = process.env): CliContext {
+  // Test/staging hooks for a private drand network. They can't help anyone cheat: tlock keys
+  // only open with signatures from the chain they were made for, and the escrow pins its own.
+  let chain = QUICKNET;
+  let client: ChainClient;
+  if (env.CONDLOCK_DRAND_CHAIN_FILE) {
+    chain = chainFromInfo(JSON.parse(readFileSyncUtf8(env.CONDLOCK_DRAND_CHAIN_FILE)));
+    process.stderr.write(`condlock: using drand chain ${chain.hash.slice(0, 12)}… from CONDLOCK_DRAND_CHAIN_FILE (not quicknet)\n`);
+  }
+  client = createDrandClient(chain, env.CONDLOCK_DRAND_URL ?? QUICKNET_RELAYS[0]);
   return {
     cwd: process.cwd(),
     out: (l) => process.stdout.write(l + "\n"),
@@ -88,17 +118,27 @@ export function defaultContext(): CliContext {
         rl.close();
       }
     },
-    client: createDrandClient(QUICKNET),
-    chain: QUICKNET,
+    client,
+    chain,
     generateDek,
+    home: env.CONDLOCK_HOME ?? path.join(homedir(), ".condlock"),
+    fetch: globalThis.fetch.bind(globalThis),
+    now: () => new Date(),
+    env,
   };
 }
 
+function readFileSyncUtf8(p: string): string {
+  return readFileSync(p, "utf8");
+}
+
 const USAGE = `usage:
-  condlock lock <path...> --until <time|duration> [--failsafe <time|duration>] [--vault <dir>] [--yes]
-  condlock unlock <vault> [--out <dir>]
+  condlock device register --escrow <url> [--label <name>]   (admin token in CONDLOCK_ADMIN_TOKEN)
+  condlock lock <path...> --until <time|duration> [--escrow] [--failsafe <time|duration>] [--vault <dir>] [--yes]
+  condlock lock <path...> --nfl <condition.json> [--guardian <age1...>] [--failsafe <time|duration>] [--yes]
+  condlock unlock <vault> [--out <dir>] [--guardian-share <file>]
   condlock status <vault> [--offline]
-  condlock log <vault>
+  condlock log <vault> [--server]
 
 times:      2027-01-01T09:00Z, 2027-01-01 (midnight UTC), or a duration: 90s, 10m, 2h, 3d, 1w, 1y, 1h30m
 fail-safe:  every vault also opens on its fail-safe date (default 1 year, minimum 30 days)`;
@@ -117,6 +157,8 @@ export async function run(argv: string[], ctx: CliContext = defaultContext()): P
         return await cmdStatus(rest, ctx);
       case "log":
         return await cmdLog(rest, ctx);
+      case "device":
+        return await cmdDevice(rest, ctx);
       case "help":
       case "--help":
       case "-h":
@@ -145,15 +187,52 @@ function parse(args: string[], options: NonNullable<ParseArgsConfig["options"]>)
 
 // ---------- lock ----------
 
+interface NflRule {
+  type: "nfl";
+  game: { home: string; away: string; kickoffAt: string; apiSportsId: string; theSportsDbId: string };
+  team: string;
+  outcome: string;
+  ifTie: string;
+  ifPostponed: string;
+  ifCancelled: string;
+}
+
+async function readNflRule(file: string): Promise<NflRule> {
+  let rule: NflRule;
+  try {
+    rule = JSON.parse(await fsp.readFile(file, "utf8")) as NflRule;
+  } catch (err) {
+    throw new Error(`couldn't read the NFL condition ${file}: ${(err as Error).message}`);
+  }
+  if (rule?.type !== "nfl" || typeof rule.game !== "object" || typeof rule.team !== "string") {
+    throw new Error(`${file} is not an NFL condition (see services/escrow/README.md for the format)`);
+  }
+  return rule;
+}
+
+async function escrowFor(ctx: CliContext): Promise<{ client: EscrowClient; url: string; deviceId: string }> {
+  const device = await loadDevice(ctx.home);
+  if (!device) throw new Error(`this computer has no escrow device yet; run: condlock device register --escrow <url>`);
+  const client = new EscrowClient({ url: device.escrowUrl, deviceId: device.deviceId, key: device.key, fetch: ctx.fetch, now: ctx.now });
+  return { client, url: device.escrowUrl, deviceId: device.deviceId };
+}
+
 async function cmdLock(args: string[], ctx: CliContext): Promise<number> {
   const { values, positionals } = parse(args, {
     until: { type: "string" },
+    nfl: { type: "string" },
+    escrow: { type: "boolean" },
+    guardian: { type: "string" },
     failsafe: { type: "string" },
     vault: { type: "string" },
     yes: { type: "boolean", short: "y" },
   });
   if (positionals.length === 0) throw new UsageError("lock needs at least one file or folder");
-  if (typeof values.until !== "string") throw new UsageError("lock needs --until <time|duration>");
+  const hasUntil = typeof values.until === "string";
+  const hasNfl = typeof values.nfl === "string";
+  if (hasUntil === hasNfl) throw new UsageError("lock needs exactly one of --until <time|duration> or --nfl <condition.json>");
+  const useEscrow = hasNfl || values.escrow === true || typeof values.guardian === "string";
+  const nflRule = hasNfl ? await readNflRule(path.resolve(ctx.cwd, values.nfl as string)) : undefined;
 
   const inputs = positionals.map((p) => path.resolve(ctx.cwd, p));
   for (const p of inputs) {
@@ -175,27 +254,28 @@ async function cmdLock(args: string[], ctx: CliContext): Promise<number> {
     if (vaultDir === p || isInside(vaultDir, p)) throw new Error(`the vault can't be inside what it locks: ${p}`);
   }
   if (await exists(vaultDir)) throw new Error(`${vaultDir} already exists`);
+  const escrow = useEscrow ? await escrowFor(ctx) : undefined;
 
   // "Now" for durations and sanity checks comes from drand's latest verified round.
   const now = await drandNow(ctx);
   if (!now.fromDrand) {
     ctx.err(`warning: couldn't reach drand, so durations are measured from this computer's clock (${now.date.toISOString()})`);
   }
-  const until = parseWhen(values.until, now.date);
-  if (until.getTime() <= now.date.getTime()) throw new Error(`--until ${until.toISOString()} is not in the future`);
+  const until = hasUntil ? parseWhen(values.until as string, now.date) : undefined;
+  if (until && until.getTime() <= now.date.getTime()) throw new Error(`--until ${until.toISOString()} is not in the future`);
   const failsafe =
     typeof values.failsafe === "string"
       ? parseWhen(values.failsafe, now.date)
-      : new Date(Math.max(now.date.getTime() + DEFAULT_FAILSAFE_MS, until.getTime()));
+      : new Date(Math.max(now.date.getTime() + DEFAULT_FAILSAFE_MS, until?.getTime() ?? 0));
   if (failsafe.getTime() < now.date.getTime() + MIN_FAILSAFE_MS) {
     throw new Error(`the fail-safe must be at least 30 days away (got ${failsafe.toISOString()})`);
   }
-  if (failsafe.getTime() < until.getTime()) {
+  if (until && failsafe.getTime() < until.getTime()) {
     throw new Error("the fail-safe can't be earlier than the unlock time");
   }
-  const unlockRound = roundForTime(until, ctx.chain);
+  const unlockRound = until ? roundForTime(until, ctx.chain) : undefined;
   const failsafeRound = roundForTime(failsafe, ctx.chain);
-  const unlockAt = timeOfRound(unlockRound, ctx.chain);
+  const unlockAt = unlockRound !== undefined ? timeOfRound(unlockRound, ctx.chain) : undefined;
   const failsafeAt = timeOfRound(failsafeRound, ctx.chain);
 
   // Show exactly what will happen, then ask.
@@ -203,8 +283,15 @@ async function cmdLock(args: string[], ctx: CliContext): Promise<number> {
   ctx.out("condlock will encrypt and then DELETE these originals:");
   for (const it of items) ctx.out(`  ${it.path}  (${it.summary})`);
   ctx.out(`vault:      ${vaultDir}`);
-  ctx.out(`unlocks:    ${unlockAt.toISOString()}  (drand round ${unlockRound}, in ${formatSpan(unlockAt.getTime() - now.date.getTime())})`);
+  if (unlockAt) {
+    ctx.out(`unlocks:    ${unlockAt.toISOString()}  (drand round ${unlockRound}, in ${formatSpan(unlockAt.getTime() - now.date.getTime())})`);
+  } else {
+    const g = nflRule!.game;
+    ctx.out(`unlocks:    when ${nflRule!.team} ${nflRule!.outcome === "loss" ? "lose" : "win"} ${g.away} at ${g.home} (kickoff ${g.kickoffAt})`);
+    ctx.out(`            tie: ${nflRule!.ifTie}, postponed: ${nflRule!.ifPostponed}, cancelled: ${nflRule!.ifCancelled}`);
+  }
   ctx.out(`fail-safe:  ${failsafeAt.toISOString()}  (drand round ${failsafeRound})`);
+  if (escrow) ctx.out(`escrow:     ${escrow.url}${values.guardian ? " (key split 2-of-3 with your guardian)" : ""}`);
   ctx.out("Nothing, including you, can open the vault before then. Keep a copy first if you might need one.");
   if (!values.yes) {
     const answer = await ctx.prompt(`Type "${CONFIRM_WORD}" to lock and delete the originals: `);
@@ -218,28 +305,54 @@ async function cmdLock(args: string[], ctx: CliContext): Promise<number> {
   let created = false;
   let vaultId: string;
   let entryCount: number;
+  let sealed: Record<string, any> | undefined;
   try {
     const result = await createVault({ inputs, vaultDir, dek });
     created = true;
     vaultId = result.vaultId;
     entryCount = result.manifest.entries.length;
-    const timelock = await wrapDek({ dek, vaultId, target: { round: unlockRound }, chain: ctx.chain });
-    const failsafeEnv = await wrapDek({ dek, vaultId, target: { round: failsafeRound }, chain: ctx.chain });
     await fsp.mkdir(path.join(vaultDir, KEYS_DIR));
-    await fsp.writeFile(path.join(vaultDir, KEYS_DIR, KEY_FILES.timelock), serializeTlockEnvelope(timelock), { flag: "wx" });
+    const keys: LockFile["keys"] = { failsafe: `${KEYS_DIR}/${KEY_FILES.failsafe}` };
+    if (unlockRound !== undefined) {
+      const timelock = await wrapDek({ dek, vaultId, target: { round: unlockRound }, chain: ctx.chain });
+      await fsp.writeFile(path.join(vaultDir, KEYS_DIR, KEY_FILES.timelock), serializeTlockEnvelope(timelock), { flag: "wx" });
+      keys.timelock = `${KEYS_DIR}/${KEY_FILES.timelock}`;
+    }
+    const failsafeEnv = await wrapDek({ dek, vaultId, target: { round: failsafeRound }, chain: ctx.chain });
     await fsp.writeFile(path.join(vaultDir, KEYS_DIR, KEY_FILES.failsafe), serializeTlockEnvelope(failsafeEnv), { flag: "wx" });
+    // Prove the vault decrypts with this key before anything is sealed or deleted.
+    await verifyVault(vaultDir, dek);
+
+    if (escrow) {
+      const condition = nflRule ?? { type: "time", unlockAt: unlockAt!.toISOString() };
+      const res = await escrow.client.call("POST", "/locks", {
+        vaultId,
+        condition,
+        failsafeAt: failsafeAt.toISOString(),
+        dek: Buffer.from(dek).toString("base64"),
+        ...(typeof values.guardian === "string" ? { guardian: { recipient: values.guardian } } : {}),
+      });
+      if (res.status !== 201) throw new Error(`the escrow refused the lock (${res.status} ${res.json.error ?? ""}): ${res.json.message ?? ""}`);
+      sealed = res.json;
+      if (sealed.guardian?.share) {
+        await fsp.writeFile(path.join(vaultDir, KEYS_DIR, GUARDIAN_SHARE_FILE), String(sealed.guardian.share), { flag: "wx" });
+        keys.guardianShare = `${KEYS_DIR}/${GUARDIAN_SHARE_FILE}`;
+      }
+    }
     const lock: LockFile = {
       format: "condlock-lock",
-      version: 1,
+      version: 2,
       vaultId,
       createdAt: new Date().toISOString(),
-      condition: { type: "time", round: unlockRound, unlockAt: unlockAt.toISOString() },
+      condition: nflRule ? { type: "nfl", rule: nflRule as unknown as Record<string, unknown> } : { type: "time", round: unlockRound!, unlockAt: unlockAt!.toISOString() },
       failsafe: { round: failsafeRound, unlockAt: failsafeAt.toISOString() },
-      keys: { timelock: `${KEYS_DIR}/${KEY_FILES.timelock}`, failsafe: `${KEYS_DIR}/${KEY_FILES.failsafe}` },
+      keys,
+      vaultHeader: await readVaultHeader(vaultDir),
+      ...(escrow && sealed
+        ? { escrow: { url: escrow.url, deviceId: escrow.deviceId, keyScheme: String(sealed.keyScheme), conditionSha256: String(sealed.conditionSha256) } }
+        : {}),
     };
     await fsp.writeFile(path.join(vaultDir, LOCK_FILE), JSON.stringify(lock, null, 2) + "\n", { flag: "wx" });
-    // Prove the vault decrypts with this key before anything is deleted.
-    await verifyVault(vaultDir, dek);
   } catch (err) {
     if (created) await fsp.rm(vaultDir, { recursive: true, force: true });
     throw new Error(`lock failed, originals untouched: ${(err as Error).message}`);
@@ -250,17 +363,23 @@ async function cmdLock(args: string[], ctx: CliContext): Promise<number> {
   await appendLog(vaultDir, "locked", {
     vaultId,
     items: entryCount,
-    unlockRound,
-    unlockAt: unlockAt.toISOString(),
+    condition: nflRule ? "nfl" : "time",
+    ...(unlockRound !== undefined ? { unlockRound, unlockAt: unlockAt!.toISOString() } : {}),
     failsafeRound,
     failsafeAt: failsafeAt.toISOString(),
     drandRoundAtLock: now.round,
+    ...(sealed ? { escrow: escrow!.url, keyScheme: sealed.keyScheme, conditionSha256: sealed.conditionSha256 } : {}),
   });
 
   for (const p of inputs) await fsp.rm(p, { recursive: true });
   await appendLog(vaultDir, "originals-deleted", { items: inputs.length });
 
   ctx.out(`Locked ${entryCount} item(s) into ${vaultDir}`);
+  if (sealed) ctx.out(`Sealed with the escrow (${sealed.keyScheme}); condition sha256 ${sealed.conditionSha256}`);
+  if (sealed?.guardian) {
+    ctx.out(`Send your guardian ${path.join(vaultDir, KEYS_DIR, GUARDIAN_SHARE_FILE)}. Only their key opens it (age -d -i <their key>),`);
+    ctx.out(`and it's only needed if one of the escrow's two key holders is unavailable.`);
+  }
   ctx.out(`Originals deleted (removed directly, not moved to the Trash).`);
   ctx.out(copiesChecklist());
   return EXIT.OK;
@@ -283,20 +402,35 @@ export function copiesChecklist(): string {
 
 // ---------- unlock ----------
 
+async function readLockFile(vaultDir: string): Promise<LockFile | null> {
+  try {
+    return JSON.parse(await fsp.readFile(path.join(vaultDir, LOCK_FILE), "utf8")) as LockFile;
+  } catch {
+    return null;
+  }
+}
+
+/** Fields where vault.json differs from the copy kept in lock.json. */
+function headerDiff(a: VaultHeader, b: VaultHeader): string[] {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].filter((k) => JSON.stringify((a as any)[k]) !== JSON.stringify((b as any)[k])).sort();
+}
+
 async function cmdUnlock(args: string[], ctx: CliContext): Promise<number> {
-  const { values, positionals } = parse(args, { out: { type: "string" } });
+  const { values, positionals } = parse(args, { out: { type: "string" }, "guardian-share": { type: "string" } });
   const vaultDir = vaultArg(positionals, ctx);
   await vaultHeader(vaultDir);
+  const lock = await readLockFile(vaultDir);
   const envelopes = await readEnvelopes(vaultDir);
   const outDir = path.resolve(ctx.cwd, typeof values.out === "string" ? values.out : path.dirname(vaultDir));
 
   let dek: Uint8Array | undefined;
-  let opened: { name: string; env: TlockEnvelope } | undefined;
+  let via: string | undefined;
   const locked: StillLockedError[] = [];
   for (const e of envelopes) {
     try {
       dek = await unwrapDek(e.env, { client: ctx.client });
-      opened = e;
+      via = `${e.name === "failsafe" ? "fail-safe" : "time-lock"} key (drand round ${e.env.round})`;
       break;
     } catch (err) {
       if (err instanceof StillLockedError) {
@@ -312,7 +446,14 @@ async function cmdUnlock(args: string[], ctx: CliContext): Promise<number> {
     }
   }
 
-  if (!dek || !opened) {
+  if (!dek && lock?.escrow) {
+    const r = await unlockViaEscrow(vaultDir, lock, ctx, typeof values["guardian-share"] === "string" ? values["guardian-share"] : undefined, locked);
+    if (typeof r === "number") return r;
+    dek = r.dek;
+    via = r.via;
+  }
+
+  if (!dek || !via) {
     const first = locked[0]!;
     await appendLog(vaultDir, "unlock-attempt", { result: "still-locked", round: first.round, latestRound: first.latestRound });
     ctx.out(`still locked until ${first.unlockAt.toISOString()}`);
@@ -325,13 +466,86 @@ async function cmdUnlock(args: string[], ctx: CliContext): Promise<number> {
 
   try {
     const { restored } = await openVault({ vaultDir, dek, outDir });
-    await appendLog(vaultDir, "unlocked", { via: opened.name, round: opened.env.round, items: restored.length });
-    ctx.out(`Unlocked with the ${opened.name === "failsafe" ? "fail-safe" : "time-lock"} key (drand round ${opened.env.round}). Restored:`);
+    await appendLog(vaultDir, "unlocked", { via, items: restored.length });
+    ctx.out(`Unlocked with the ${via}. Restored:`);
     for (const r of restored) ctx.out(`  ${r}`);
     ctx.out(`The vault is still at ${vaultDir}; delete it once you've checked your files.`);
     return EXIT.OK;
   } finally {
     zeroize(dek);
+  }
+}
+
+/** Ask the escrow. Returns the key, or an exit code after printing why not. */
+async function unlockViaEscrow(
+  vaultDir: string,
+  lock: LockFile,
+  ctx: CliContext,
+  guardianShareFile: string | undefined,
+  locked: StillLockedError[],
+): Promise<{ dek: Uint8Array; via: string } | number> {
+  // The escrow releases a key once. Don't spend it on a vault whose header can't open.
+  if (lock.vaultHeader) {
+    const diff = headerDiff(await readVaultHeader(vaultDir), lock.vaultHeader);
+    if (diff.length) {
+      await appendLog(vaultDir, "unlock-attempt", { result: "vault-header-mismatch", fields: diff });
+      ctx.err(`vault.json doesn't match the copy in lock.json (${diff.join(", ")}). Restore it before unlocking:`);
+      ctx.err(`the escrow releases the key only once, and it can't open a vault with a damaged header.`);
+      return EXIT.ERROR;
+    }
+  }
+  const { client } = await escrowFor(ctx);
+  const body = guardianShareFile ? { guardianShare: (await fsp.readFile(path.resolve(ctx.cwd, guardianShareFile), "utf8")).trim() } : undefined;
+  let res;
+  try {
+    res = await client.call("POST", `/locks/${lock.vaultId}/unlock`, body);
+  } catch (err) {
+    if (err instanceof EscrowUnreachableError) {
+      await appendLog(vaultDir, "unlock-attempt", { result: "escrow-unreachable" });
+      ctx.err(`${err.message}. Nothing was changed; try again later.`);
+      return EXIT.ESCROW_UNAVAILABLE;
+    }
+    throw err;
+  }
+  const j = res.json;
+  const failsafe = locked.find((l) => l.round === lock.failsafe.round)?.unlockAt.toISOString() ?? lock.failsafe.unlockAt;
+  switch (res.status) {
+    case 200: {
+      await appendLog(vaultDir, "escrow-released", { via: j.via });
+      return { dek: new Uint8Array(Buffer.from(String(j.dek), "base64")), via: `escrow (${j.via === "failsafe" ? "fail-safe" : "condition met"}${j.detail?.reason ? `: ${j.detail.reason}` : ""})` };
+    }
+    case 423:
+      await appendLog(vaultDir, "unlock-attempt", { result: "still-locked", escrow: j.reason, resolved: j.resolved ?? false });
+      if (lock.condition.type === "time") {
+        ctx.out(`still locked until ${String(j.unlockAt ?? lock.condition.unlockAt)}`);
+        ctx.out(`  escrow: ${j.reason}`);
+      } else {
+        ctx.out(`still locked: ${j.reason}`);
+      }
+      if (j.resolved) ctx.out("  the sealed outcome didn't happen; only the fail-safe opens this vault now");
+      ctx.out(`  fail-safe: ${failsafe}`);
+      return EXIT.STILL_LOCKED;
+    case 409:
+      await appendLog(vaultDir, "unlock-attempt", { result: "already-released" });
+      ctx.err("The escrow already released this key once; it never releases it again. The fail-safe still opens the vault on its date.");
+      return EXIT.ERROR;
+    case 401:
+      await appendLog(vaultDir, "unlock-attempt", { result: "unauthorized" });
+      ctx.err("The escrow rejected this request's signature. If this computer's clock is more than 5 minutes off, fix it; changing it can't unlock anything.");
+      return EXIT.ERROR;
+    case 503:
+      await appendLog(vaultDir, "unlock-attempt", { result: j.error });
+      ctx.err(`The escrow can't release the key right now (${j.error}): ${j.message}`);
+      if (j.error === "insufficient-shares") {
+        ctx.err(`  key holders: ${Object.entries(j.holders ?? {}).map(([k, v]) => `${k} ${String(v)}`).join(", ")}`);
+        ctx.err(`  ask your guardian to decrypt ${path.join(vaultDir, lock.keys.guardianShare ?? "keys/guardian-share.age")} and run:`);
+        ctx.err(`  condlock unlock ${vaultDir} --guardian-share <file with their output, base64>`);
+      }
+      return EXIT.ESCROW_UNAVAILABLE;
+    default:
+      await appendLog(vaultDir, "unlock-attempt", { result: j.error ?? `http-${res.status}` });
+      ctx.err(`The escrow refused to release the key (${res.status} ${j.error ?? ""}): ${j.message ?? ""}`);
+      return EXIT.ERROR;
   }
 }
 
@@ -341,7 +555,7 @@ async function cmdStatus(args: string[], ctx: CliContext): Promise<number> {
   const { values, positionals } = parse(args, { offline: { type: "boolean" } });
   const vaultDir = vaultArg(positionals, ctx);
   const header = await vaultHeader(vaultDir);
-  const lock = JSON.parse(await fsp.readFile(path.join(vaultDir, LOCK_FILE), "utf8")) as LockFile;
+  const lock = (await readLockFile(vaultDir)) as LockFile;
   const envelopes = await readEnvelopes(vaultDir);
   const dataFiles = await fsp.readdir(path.join(vaultDir, "data"));
   let bytes = 0;
@@ -349,9 +563,9 @@ async function cmdStatus(args: string[], ctx: CliContext): Promise<number> {
   const { entries } = await readLog(vaultDir);
 
   ctx.out(`vault:      ${vaultDir}`);
-  ctx.out(`vault ID:   ${header.vaultId}`);
+  ctx.out(`vault ID:   ${header.vaultId}  (format v${header.version}${header.keyCommitment ? ", key-committed" : ""})`);
   ctx.out(`created:    ${lock.createdAt}`);
-  ctx.out(`condition:  time-lock`);
+  ctx.out(`condition:  ${lock.condition.type === "nfl" ? "NFL result" : "time-lock"}`);
   for (const e of envelopes) {
     const label = e.name === "failsafe" ? "fail-safe: " : "unlocks:   ";
     ctx.out(`${label} ${e.env.unlockAt}  (drand round ${e.env.round})`);
@@ -364,6 +578,20 @@ async function cmdStatus(args: string[], ctx: CliContext): Promise<number> {
   if (values.offline) {
     ctx.out("state:      not checked (--offline)");
     return EXIT.OK;
+  }
+  if (lock.escrow) {
+    try {
+      const { client } = await escrowFor(ctx);
+      const res = await client.call("GET", `/locks/${lock.vaultId}`);
+      if (res.status === 200) {
+        const last = res.json.latestVerifierResult?.detail?.reason;
+        ctx.out(`escrow:     ${res.json.status} (${res.json.keyScheme})${last ? `; last check: ${last}` : ""}`);
+      } else {
+        ctx.out(`escrow:     unavailable (${res.status} ${res.json.error ?? ""})`);
+      }
+    } catch (err) {
+      ctx.out(`escrow:     unreachable (${(err as Error).message})`);
+    }
   }
   let latest: number;
   try {
@@ -385,7 +613,7 @@ async function cmdStatus(args: string[], ctx: CliContext): Promise<number> {
 // ---------- log ----------
 
 async function cmdLog(args: string[], ctx: CliContext): Promise<number> {
-  const { positionals } = parse(args, {});
+  const { values, positionals } = parse(args, { server: { type: "boolean" } });
   const vaultDir = vaultArg(positionals, ctx);
   await vaultHeader(vaultDir);
   const { entries, broken } = await readLog(vaultDir);
@@ -395,12 +623,69 @@ async function cmdLog(args: string[], ctx: CliContext): Promise<number> {
       .join(" ");
     ctx.out(`${String(e.seq).padStart(3)}  ${e.at}  ${e.event.padEnd(18)} ${detail}`);
   }
+  let code: number = EXIT.OK;
   if (broken) {
     ctx.out(`WARNING: ${LOG_FILE} has been tampered with: ${broken}`);
-    return EXIT.ERROR;
+    code = EXIT.ERROR;
+  } else {
+    ctx.out(`(${entries.length} entries, chain intact)`);
   }
-  ctx.out(`(${entries.length} entries, chain intact)`);
-  return EXIT.OK;
+  if (values.server) {
+    const lock = await readLockFile(vaultDir);
+    if (!lock?.escrow) throw new Error("this vault isn't sealed with an escrow");
+    const { client } = await escrowFor(ctx);
+    const res = await client.call("GET", `/locks/${lock.vaultId}/log`);
+    if (res.status !== 200) throw new Error(`couldn't read the escrow's log (${res.status} ${res.json.error ?? ""})`);
+    ctx.out(`escrow audit log (${lock.escrow.url}, append-only on the server):`);
+    for (const e of res.json.entries as { id: number; at: string; event: string; detail: Record<string, unknown> }[]) {
+      const d = Object.entries(e.detail)
+        .filter(([k]) => k !== "reports")
+        .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+        .join(" ");
+      ctx.out(`${String(e.id).padStart(5)}  ${e.at}  ${e.event.padEnd(18)} ${d}`);
+    }
+  }
+  return code;
+}
+
+// ---------- device ----------
+
+async function cmdDevice(args: string[], ctx: CliContext): Promise<number> {
+  const [sub, ...rest] = args;
+  if (sub === "register") {
+    const { values } = parse(rest, { escrow: { type: "string" }, label: { type: "string" } });
+    if (typeof values.escrow !== "string") throw new UsageError("device register needs --escrow <url>");
+    const url = checkEscrowUrl(values.escrow);
+    const token = ctx.env.CONDLOCK_ADMIN_TOKEN;
+    if (!token) throw new Error("set CONDLOCK_ADMIN_TOKEN to the escrow's admin token (it's only needed once, to register)");
+    if (await loadDevice(ctx.home)) throw new Error(`${path.join(ctx.home, "device.json")} already exists`);
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const raw = publicKey.export({ format: "jwk" }).x!;
+    const label = typeof values.label === "string" ? values.label : "condlock CLI";
+    const deviceId = await registerDevice({ url, adminToken: token, publicKey: raw, label, fetch: ctx.fetch });
+    const file = await saveDevice(ctx.home, {
+      format: "condlock-device",
+      version: 1,
+      escrowUrl: url,
+      deviceId,
+      publicKey: raw,
+      privateKey: privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
+      label,
+    });
+    ctx.out(`Registered this computer with ${url} as device ${deviceId}.`);
+    ctx.out(`Device key: ${file} (owner-only). It signs requests; it can't open any vault.`);
+    return EXIT.OK;
+  }
+  if (sub === undefined || sub === "show") {
+    const d = await loadDevice(ctx.home);
+    if (!d) {
+      ctx.out("No escrow device registered. Run: condlock device register --escrow <url>");
+      return EXIT.OK;
+    }
+    ctx.out(`escrow:  ${d.escrowUrl}\ndevice:  ${d.deviceId} (${d.label})\nkey:     ${d.publicKey}`);
+    return EXIT.OK;
+  }
+  throw new UsageError(`unknown device command "${sub}"`);
 }
 
 // ---------- helpers ----------

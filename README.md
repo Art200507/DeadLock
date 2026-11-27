@@ -55,7 +55,7 @@ fail-safe date, so nothing is lost forever.
 | 3 | CLI, local only: `condlock lock / unlock / status / log` with tlock fail-safe, deletion, copies checklist | ✅ done |
 | 4 | Escrow service: Hono API, Postgres, KMS envelope wrapping, device signatures, audit log, enclave-ready verifier | ✅ done (mocks; real KMS and enclave are manual) |
 | 5 | Verifiers (time via drand; NFL with API-Sports + TheSportsDB agreeing), TLS egress from the enclave, credential delivery, 2-of-3 key split | ✅ done (mocks; live sports test, real KMS and enclave are manual) |
-| 6 | End to end against the deployed escrow, including cheat attempts | ⏳ next |
+| 6 | End to end on a local copy of the deployed stack, through the CLI; cheat attempts as tests; key-committing vault format v2; deploy guide | ✅ done (locally; a real AWS deployment is yours to run, see [docs/DEPLOY.md](docs/DEPLOY.md)) |
 
 ## Using the CLI
 
@@ -67,6 +67,14 @@ condlock lock ~/Pictures/Holiday --until 2d              # or 10m, 1h30m, 2027-0
 condlock status ~/Pictures/Holiday.condlock
 condlock unlock ~/Pictures/Holiday.condlock              # "still locked until <time>" until drand says so
 condlock log ~/Pictures/Holiday.condlock
+
+# With an escrow (once per computer; the admin token is needed only for this):
+CONDLOCK_ADMIN_TOKEN=... condlock device register --escrow https://escrow.example.com
+condlock lock ~/Games --until 30d --escrow               # time-lock, also sealed with the escrow
+condlock lock ~/Games --nfl bills-win.json               # NFL result (condition format: services/escrow/README.md)
+condlock lock ~/Games --nfl bills-win.json --guardian age1...   # 2-of-3 split, if the escrow runs KEY_SPLIT=2of3
+condlock unlock ~/Games.condlock [--guardian-share share.b64]
+condlock log ~/Games.condlock --server                   # also the escrow's append-only audit log
 ```
 
 `lock` lists exactly what it will delete and asks you to type `delete` (`--yes` skips this,
@@ -77,22 +85,26 @@ print a checklist of places copies may still live (iCloud Photos, Google Photos,
 Downloads, chat apps). The data key exists only in memory and is zeroed after use. `unlock`
 asks drand, never the laptop clock.
 
-Exit codes: `0` ok · `1` error · `2` still locked · `3` drand unreachable (state unknown) ·
-`4` cancelled at the confirmation.
+With an escrow, `unlock` first tries the local tlock keys. If they're still locked, it asks the
+escrow, which releases the key once, after its verifier checks the condition. Before asking, it
+checks that `vault.json` matches the copy kept in `lock.json`, so a damaged header can't waste
+that one release.
 
-> Milestone 3 is local only: a vault opens at its time through drand. The KMS escrow and
-> event conditions (NFL results) arrive in milestones 4 and 5.
+Exit codes: `0` ok · `1` error · `2` still locked · `3` drand unreachable (state unknown) ·
+`4` cancelled at the confirmation · `5` escrow unavailable or short of key shares (try later).
 
 ## Repo layout
 
 ```
 packages/core      crypto: chunked AES-256-GCM vault, manifest, tlock wrap/unwrap
-packages/cli       condlock lock | unlock | status | log (local, tlock only)
+packages/cli       condlock lock | unlock | status | log | device (tlock, plus the escrow when asked)
 services/escrow    Hono API, key-release verifier (enclave-ready), NFL verifier, TLS egress,
                    KMS + 2-of-3 split + Postgres adapters
 db/migrations      locks, devices, audit_log, request_nonces + guard triggers
 docs/DESIGN.md     design summary, vault and envelope formats
 docs/ENCLAVE.md    Nitro Enclave + KMS key policy setup (manual runbook)
+docs/DEPLOY.md     full AWS deployment steps and monthly cost (manual)
+e2e/               the whole stack locally, driven through the CLI, plus the cheat-attempt suite
 ```
 
 ## Running the tests
@@ -102,7 +114,7 @@ Requires Node 22+ and pnpm (`corepack enable`, or prefix commands with `npx pnpm
 ```sh
 pnpm install
 pnpm typecheck
-pnpm test                                   # everything, including real drand (~2 min)
+pnpm test                                   # everything, including real drand and the e2e stack (~4 min)
 pnpm -r test:offline                        # skip network tests (CONDLOCK_OFFLINE=1)
 pnpm --filter @condlock/escrow test:real-kms      # manual: real AWS KMS, see services/escrow/README.md
 pnpm --filter @condlock/escrow test:live-sports   # manual: real API-Sports + TheSportsDB free tiers
@@ -123,6 +135,30 @@ The escrow tests run against:
 
 They need no cloud account and no network. The real-KMS and live-sports tests are manual, and
 skipped unless you configure your own keys.
+
+The **end-to-end suite** (`e2e/`) starts the system as it's deployed:
+- **Deployed processes, run from their real entry points:** the escrow API
+  (`services/escrow/src/server.ts`) and the enclave verifier (`src/verifier/main.ts`).
+- **Postgres:** PGlite behind a real Postgres wire-protocol socket, reached through
+  node-postgres.
+- **KMS:** a mock that speaks the real AWS JSON protocol, with the PCR0 key policies. A mock
+  Nitro attestation helper stands in for `nsm-attest`.
+- **The rest:** a private drand chain served over drand's HTTP API, and mock sports providers
+  over TLS, reached through `vsock-proxy` stand-ins.
+
+It drives everything with the `condlock` CLI as a subprocess:
+- **Lock and unlock:** it locks real folders, deletes the originals, and unlocks them on time,
+  on an NFL win, through 2-of-3 with a guardian, and through the fail-safe with the escrow
+  frozen.
+- **Cheat attempts**, each of which must stay locked:
+  - moving the device clock;
+  - editing or deleting the local and server logs;
+  - replaying or forging signed requests;
+  - swapping terms in the local files or in the database;
+  - a non-approved enclave build, and the API host calling KMS directly;
+  - a lying source, disagreeing sources, and sources that are down;
+  - a single 2-of-3 share;
+  - a tampered vault header.
 
 ## Secrets
 

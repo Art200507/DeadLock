@@ -28,9 +28,9 @@ export async function pgliteClient(dataDir?: string): Promise<SqlClient> {
 }
 
 /** A real Postgres server via node-postgres, e.g. a Neon or Supabase DATABASE_URL. */
-export async function postgresClient(connectionString: string): Promise<SqlClient> {
+export async function postgresClient(connectionString: string, max = 5): Promise<SqlClient> {
   const { default: pg } = await import("pg");
-  const pool = new pg.Pool({ connectionString, max: 5 });
+  const pool = new pg.Pool({ connectionString, max });
   return {
     query: async <T>(sql: string, params: unknown[] = []) => ({
       rows: (await pool.query(sql, params)).rows as T[],

@@ -12,6 +12,8 @@ src/verifiers/         condition checkers: NFL (two sources must agree) and the 
 src/egress/            outbound HTTPS from the verifier: allowlisted dialer, TLS inside, byte forwarder
 src/keywrap/           KeyWrapper seam: AWS KMS (+ attestation/Recipient), 2-of-3 threshold, mocks
 src/conditions.ts      condition validation, canonical JSON, seal hash
+src/signing.ts         re-exports device request signing from @condlock/core (shared with the CLI)
+src/migrate.ts         `pnpm migrate`: apply migrations as the database owner
 src/db.ts              SqlClient for node-postgres and PGlite, migration runner
 ../../db/migrations    schema + triggers (audit append-only, sealed fields immutable)
 enclave/               Dockerfile, entrypoint and KMS key policies (templates; see docs/ENCLAVE.md)
@@ -152,6 +154,7 @@ Options for the second provider (only the mock is implemented):
 cp .env.example .env          # defaults: PGlite in memory, mock KMS, in-process verifier
 pnpm --filter @condlock/escrow dev
 pnpm --filter @condlock/escrow test
+pnpm --filter @condlock/escrow migrate   # apply migrations explicitly (as the DB owner; set SKIP_MIGRATIONS=1 for the server)
 ```
 
 Tests use:

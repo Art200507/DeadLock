@@ -12,8 +12,14 @@
  *   SECOND_PROVIDER     "aws" if share b of 2-of-3 locks lives in another account's KMS key (default),
  *                       "none" to support only single-key locks.
  *   DEV_NO_ATTESTATION=1  local development only: decrypt without attestation, direct network.
+ *   DRAND_CHAIN_FILE    tests/staging only: accept a different drand chain (refused in production)
+ *   EGRESS_EXTRA_CA_FILE  tests/staging only: also trust this CA for egress TLS (refused in production;
+ *                       in a real enclave anything like it would be baked into the image and change PCR0)
  */
+import { readFileSync } from "node:fs";
+import * as tls from "node:tls";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { drandChainFromEnv } from "../config.js";
 import { DirectDialer, RoutedDialer, parseRoutes } from "../egress/dialer.js";
 import { EgressHttps } from "../egress/https.js";
 import { AwsKms } from "../keywrap/aws-kms.js";
@@ -35,7 +41,11 @@ if (!dev && !env.EGRESS_ROUTES) throw new Error("EGRESS_ROUTES is required insid
 
 const secrets = new SecretStore();
 const dialer = env.EGRESS_ROUTES ? new RoutedDialer(parseRoutes(env.EGRESS_ROUTES)) : new DirectDialer();
-const http = new EgressHttps({ dialer });
+if (env.EGRESS_EXTRA_CA_FILE && env.NODE_ENV === "production") throw new Error("EGRESS_EXTRA_CA_FILE is not allowed in production");
+const http = new EgressHttps({
+  dialer,
+  ...(env.EGRESS_EXTRA_CA_FILE ? { ca: [...tls.rootCertificates, readFileSync(env.EGRESS_EXTRA_CA_FILE, "utf8")] } : {}),
+});
 
 const kms = new AwsKms({
   keyId: "unwrap-only",
@@ -57,5 +67,5 @@ const nfl = new NflChecker({
   theSportsDb: new TheSportsDb({ http, apiKey: secrets.theSportsDbKey }),
 });
 
-await serveVerifier(new KeyReleaseVerifier({ keys, nfl, secrets }), { path: socket });
+await serveVerifier(new KeyReleaseVerifier({ keys, nfl, secrets, chain: drandChainFromEnv(env) }), { path: socket });
 console.log(`condlock verifier listening on ${socket}; egress: ${dialer instanceof RoutedDialer ? dialer.hosts.join(", ") : "direct (dev)"}`);

@@ -72,6 +72,10 @@ export function makeCtx(opts: {
   client?: ChainClient;
   chain?: DrandChain;
   answers?: string[];
+  home?: string;
+  fetch?: typeof fetch;
+  now?: () => Date;
+  env?: Record<string, string | undefined>;
 }): TestCtx {
   const answers = [...(opts.answers ?? [])];
   const ctx: TestCtx = {
@@ -93,6 +97,10 @@ export function makeCtx(opts: {
       ctx.keysIssued.push({ copy: live.slice(), live });
       return live;
     },
+    home: opts.home ?? path.join(opts.cwd, ".condlock-home"),
+    fetch: opts.fetch ?? globalThis.fetch.bind(globalThis),
+    now: opts.now ?? (() => new Date()),
+    env: opts.env ?? {},
     text: () => [...ctx.lines, ...ctx.errLines].join("\n"),
   };
   return ctx;
